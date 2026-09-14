@@ -1,0 +1,58 @@
+name: CMake
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
+  BUILD_TYPE: Release
+  CPM_SOURCE_CACHE: ${{ github.workspace }}/.cpm-cache
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-gcc
+            os: ubuntu-latest
+          - name: windows-msvc
+            os: windows-latest
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v4
+
+    # Restored after checkout, since checkout cleans the workspace the cache lives in.
+    - name: Set up cache
+      uses: actions/cache@v4
+      with:
+       path: ${{ env.CPM_SOURCE_CACHE }}
+       key: ${{ runner.os }}-cpm-${{ hashFiles('cmake/deps_cpm.cmake', 'cmake/setup_cpm.cmake') }}
+       restore-keys: |
+         ${{ runner.os }}-cpm-
+
+    - name: Setup GCC
+      if: runner.os == 'Linux'
+      uses: pkgxdev/setup@v1
+      with:
+        +: gcc@14
+
+    - name: Configure CMake
+      # Default generators: Unix Makefiles on Linux, Visual Studio (MSVC) on Windows.
+      # `CMAKE_BUILD_TYPE` is only used by single-configuration generators; multi-config ones use --config / -C below.
+      run: cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCPM_SOURCE_CACHE=${{env.CPM_SOURCE_CACHE}}
+
+    - name: Build
+      run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
+
+    - name: Test
+      working-directory: ${{github.workspace}}/build
+      # Execute tests defined by the CMake configuration.
+      # See https://cmake.org/cmake/help/latest/manual/ctest.1.html for more detail
+      run: ctest -C ${{env.BUILD_TYPE}} --output-on-failure
