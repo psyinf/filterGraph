@@ -37,11 +37,13 @@ jobs:
        restore-keys: |
          ${{ runner.os }}-cpm-
 
+    # GCC 14 ships with the ubuntu-24.04 runner image; just select it.
     - name: Setup GCC
       if: runner.os == 'Linux'
-      uses: pkgxdev/setup@v1
-      with:
-        +: gcc@14
+      run: |
+        echo "CC=gcc-14" >> "$GITHUB_ENV"
+        echo "CXX=g++-14" >> "$GITHUB_ENV"
+        g++-14 --version
 
     - name: Configure CMake
       # Default generators: Unix Makefiles on Linux, Visual Studio (MSVC) on Windows.
