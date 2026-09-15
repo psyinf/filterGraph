@@ -3,8 +3,9 @@
 This walkthrough follows the runnable sample in
 [`apps/textPipeline/main.cpp`](apps/textPipeline/main.cpp), a small text
 pipeline that exercises every core building block: a **compile-time**
-`FilterGraph`, and a **runtime**, JSON-configured `JsonFilterGraph` with a
-parallel `FanoutFilter` branch and a scatter-gather `JoinFilter`.
+`FilterGraph`, then **runtime graphs described in the text DSL** — a tap
+(fan-out), a merge (fan-in), several named outputs and up-front diagnostics —
+and finally the same kind of pipeline in the **JSON format**.
 
 ## Core concept: a chain of stages
 
@@ -13,22 +14,18 @@ Every stage is a `MessageFilter<InputType, OutputType>`. It consumes an
 feeds the next stage's `InType`, forming a chain. Returning `std::nullopt`
 **short-circuits** the chain: no later stage runs.
 
-The short-circuit is handled by the container (`FilterGraph` /
-`AnyFilterChain`), not by the stages. As soon as a stage returns
-`std::nullopt`, the chain stops and propagates `std::nullopt` out as its own
-result. A downstream stage only ever receives a real, unwrapped value, so
-stages never have to handle an empty optional as input — their only
-responsibility is deciding whether to emit `std::nullopt` themselves. Within a
-`FanoutFilter` branch the same rule applies, but the termination is confined to
-that branch and never reaches the main path.
+The short-circuit is handled by the graph (`FilterGraph`, `DslFilterGraph`,
+`JsonFilterGraph`), not by the stages. As soon as a stage returns
+`std::nullopt`, everything downstream of it is skipped. A downstream stage only
+ever receives a real, unwrapped value, so stages never have to handle an empty
+optional as input — their only responsibility is deciding whether to emit
+`std::nullopt` themselves.
 
-A stage's last `OutputType` is normally the graph's own result: a path
-typically ends in a stage that produces a real value (e.g. `JsonFilterGraph<In,
-Out>` yields an `Out`). A stage may instead declare `MessageFilter<InputType,
-Void>` to mark the path as a pure side-effect *sink* — it deliberately produces
-no consumable output, so the path ends there. This is distinct from
-`std::nullopt`, which means a single message was dropped or could not be
-processed. A `Void` stage must be the last stage in a path.
+A path normally ends in a stage that produces a real value (the graph's
+result). A stage may instead declare `MessageFilter<InputType, Void>` to mark
+the path as a pure side-effect *sink* — it deliberately produces no consumable
+output. This is distinct from `std::nullopt`, which means a single message was
+dropped or could not be processed.
 
 ```mermaid
 flowchart LR
@@ -39,8 +36,8 @@ flowchart LR
     B -. "nullopt" .-> Drop
 ```
 
-The whole chain is *itself* a `MessageFilter<FirstIn, LastOut>`, so a graph can
-be nested inside another graph anywhere a single stage is expected.
+Every graph is *itself* a `MessageFilter<In, Out>`, so a graph can be nested
+inside another graph anywhere a single stage is expected.
 
 ## 1. Compile-time pipeline
 
@@ -72,207 +69,324 @@ Output:
 [compile-time] !HPARGRETLIF ,OLLEH
 ```
 
-## 2. Runtime, JSON-configured pipeline with a fan-out branch
+## 2. Registering stages by name
 
-The same stages are registered by name (via `FilterRegistrar` /
-`registerFanoutFilter`) and assembled at runtime from JSON. A `FanoutFilter`
-duplicates the incoming message to one or more independent branches (each a
-full multi-stage path), then passes the **original** message through unchanged
-to the rest of the main path.
-
-```json
-[
-    { "type": "Fanout", "config": { "branches": [
-        [ { "type": "Uppercase" }, { "type": "Print", "config": { "prefix": "[branch] " } } ]
-    ] } },
-    { "type": "Reverse" },
-    { "type": "MinLength", "config": { "minLength": 3 } },
-    { "type": "Print", "config": { "prefix": "[main] " } }
-]
-```
+A runtime graph refers to stages by name, so each stage is registered once
+with `FilterRegistrar`. Stages that take arguments supply a creator that reads
+them from a JSON object:
 
 ```cpp
-JsonFilterGraph<std::string, int> pipeline(pipelineConfig);
-pipeline.filter(std::string{"Hello, filterGraph!"});
-pipeline.filter(std::string{"ab"}); // dropped by MinLength on the main path
+static FilterRegistrar<UppercaseFilter> registerUppercase("Uppercase");
+static FilterRegistrar<ReverseFilter>   registerReverse("Reverse");
+static FilterRegistrar<LengthFilter>    registerLength("Length"); // string -> std::size_t
+
+// Stage arguments, e.g. `MinLength(minLength=3)`, arrive as a JSON object.
+static FilterRegistrar<MinLengthFilter> registerMinLength(
+    "MinLength",
+    [](const nlohmann::json& config) {
+        return std::make_shared<MinLengthFilter>(config.at("minLength").get<std::size_t>());
+    });
+
+static FilterRegistrar<PrintFilter> registerPrint(
+    "Print",
+    [](const nlohmann::json& config) {
+        return std::make_shared<PrintFilter>(config.value("prefix", std::string{}));
+    });
 ```
+
+The same registry serves both the DSL and the JSON format.
+
+## 3. A runtime graph in the DSL, with a tap
+
+A DSL graph is a list of statements. Each statement alternates **edges** (named
+values) and **stages**, joined by `->`. `in` is the graph's input, `out` its
+output, and `end` discards a value.
+
+```text
+in -> Uppercase -> shouted -> Print(prefix="[tap] ") -> end
+in -> Reverse -> reversed -> MinLength(minLength=3) -> long -> Print(prefix="[main] ") -> out
+```
+
+Both statements read `in`, which **fans the message out**: each reader gets its
+own copy. The first statement is a *tap* — it uppercases and prints its copy,
+then discards the result at `end`. The second is the main path: it reverses the
+message, drops it if it is too short, and prints it as the graph's output.
+
+```cpp
+DslFilterGraph<std::string, int> pipeline(R"dsl(
+    in -> Uppercase -> shouted -> Print(prefix="[tap] ") -> end
+    in -> Reverse -> reversed -> MinLength(minLength=3) -> long -> Print(prefix="[main] ") -> out
+)dsl");
+
+pipeline.filter(std::string{"Hello, filterGraph!"});
+pipeline.filter(std::string{"ab"}); // tapped, then dropped by MinLength on the main path
+```
+
+> The raw string uses a custom delimiter (`R"dsl(...)dsl"`) because the graph
+> text contains `")`, which would end a plain `R"(...)"` literal.
 
 ```mermaid
 flowchart LR
-    In(["std::string<br/>&quot;Hello, filterGraph!&quot;"]) --> F{{"FanoutFilter&lt;string&gt;"}}
-
-    subgraph branch ["side branch (copy, output discarded)"]
-        direction LR
-        B1["Uppercase"] --> B2["Print<br/>prefix=[branch]"]
-    end
-
-    F -. "copy" .-> B1
-    F ==>|"original, unchanged"| R["Reverse"]
-    R -->|"!HPARGRETLIF ,OLLEH"| M["MinLength<br/>minLength=3"]
-    M ==>|"len &ge; 3"| P["Print<br/>prefix=[main]"]
-    M -. "len &lt; 3" .-> Drop[["dropped"]]
-    P --> Out(["stdout"])
+    In(["in<br/>&quot;Hello, filterGraph!&quot;"])
+    In -. "copy" .-> U["Uppercase"]
+    U -->|"shouted"| PT["Print<br/>prefix=[tap]"]
+    PT --> End[["end<br/>(discarded)"]]
+    In ==>|"last reader: moved"| R["Reverse"]
+    R -->|"reversed"| M["MinLength<br/>minLength=3"]
+    M ==>|"long (len &ge; 3)"| PM["Print<br/>prefix=[main]"]
+    M -. "nullopt (len &lt; 3)" .-> Drop[["dropped"]]
+    PM -->|"out: int status"| Out(["stdout"])
 ```
 
 Output for the two inputs:
 
 ```text
-[branch] HELLO, FILTERGRAPH!
-[main] !HPARGRETLIF ,OLLEH
+[tap] HELLO, FILTERGRAPH!
+[main] !hparGretlif ,olleH
+[tap] AB
 ```
 
-The second call, `"ab"`, is copied to the branch (which uppercases and prints
-it), but on the main path `MinLength` returns `std::nullopt`, so it is dropped
-before the final `[main]` print.
+A few things to notice:
 
-> Note: branch order vs. main-path order is a side-effect of how the fanout
-> runs its branches before returning the original message; the branch print
-> happens first.
+- **Stages run in the order they are written**, so the tap prints first. (A
+  stage whose input comes from a later statement simply waits until that edge
+  has been produced.)
+- **The main path sees the original message**, not the tap's uppercased copy:
+  the tap works on its own copy, so `[main]` prints the reversed, mixed-case
+  text.
+- **`"ab"` is tapped, then dropped.** `MinLength` returns `std::nullopt`, which
+  leaves the edge `long` empty, so the final `Print` is skipped and the graph
+  returns `std::nullopt` for that message.
 
-### Which branch contributes to the output?
+## 4. Fan-in: merging paths
 
-None of them. A `FanoutFilter` is a pure *tap*: it hands each branch its own
-copy of the message, runs every branch to completion, and **discards each
-branch's result**. Whatever the branches compute (or whether a branch
-short-circuits with `std::nullopt`) never affects the main path — the value the
-fanout forwards downstream is always the unchanged original input. This holds
-regardless of how many branches there are or in what order they run; branches
-matter only for their side effects (logging, forwarding, metrics). If you need
-a branch's result to feed the output, that requires a separate merge/reduce
-stage — `FanoutFilter` deliberately does not merge.
-
-## 3. Join: scatter-gather (the mirror of fan-out)
-
-Where `FanoutFilter` splits 1→N and discards branch results, `JoinFilter`
-gathers N→1: it scatters the **same** input (a copy) through N independent,
-multi-stage paths, then hands their outputs to a **combiner** that produces a
-single result. Paths may emit different types, so their results are gathered
-type-erased (one `std::any` slot per path, in order). The combiner is supplied
-in C++ (via `registerJoinFilter<In, Out>`), since it cannot be expressed in
-JSON; the paths themselves come from configuration.
-
-A path that short-circuits with `std::nullopt` leaves an **empty slot** (a
-"hole"): the combiner sees whatever arrived and decides how to treat the
-missing paths. A `Void`-terminated path produces no value to gather and is
-rejected at construction.
-
-```json
-[
-    { "type": "Join", "config": { "paths": [
-        [ { "type": "Uppercase" } ],
-        [ { "type": "Reverse" } ],
-        [ { "type": "MinLength", "config": { "minLength": 100 } } ]
-    ] } },
-    { "type": "Print", "config": { "prefix": "[join] " } }
-]
-```
-
-The combiner concatenates the present outputs with `" | "` and reports how many
-holes it saw:
+A **merge** stage gathers several edges into one value. Writing
+`(a, b, c) -> Merge` passes the merge one `MergeInputs` slot
+(`std::vector<std::any>`) per edge, in the order listed. The combiner lives in
+C++ and is registered with `registerMergeFilter`:
 
 ```cpp
-registerJoinFilter<std::string, std::string>(
-    "Join",
-    [](std::vector<std::any>&& outputs) -> std::optional<std::string> {
+registerMergeFilter<std::string>(
+    "Concat",
+    [](MergeInputs&& inputs) -> std::optional<std::string> {
         std::string joined;
         std::size_t holes = 0;
-        for (auto& out : outputs)
+        for (auto& input : inputs)
         {
-            if (!out.has_value()) { ++holes; continue; } // dropped path -> hole
+            if (!input.has_value()) { ++holes; continue; } // dropped path -> hole
             if (!joined.empty()) { joined += " | "; }
-            joined += std::any_cast<std::string>(out);
+            joined += std::any_cast<std::string>(input);
         }
         return joined + std::format(" ({} hole{})", holes, holes == 1 ? "" : "s");
     });
 ```
 
+Three paths read the same input, and the merge combines them:
+
+```cpp
+DslFilterGraph<std::string, int> pipeline(R"dsl(
+    in -> Uppercase -> upper
+    in -> Reverse -> reversed
+    in -> MinLength(minLength=100) -> long
+    (upper, reversed, long) -> Concat -> joined -> Print(prefix="[merge] ") -> out
+)dsl");
+
+pipeline.filter(std::string{"Hello, filterGraph!"});
+```
+
 ```mermaid
 flowchart LR
-    In(["std::string<br/>&quot;Hello, filterGraph!&quot;"]) --> J{{"JoinFilter&lt;string, string&gt;"}}
-
-    J -. "copy" .-> P1["Uppercase"]
-    J -. "copy" .-> P2["Reverse"]
-    J -. "copy" .-> P3["MinLength<br/>minLength=100"]
-
-    P1 -->|"HELLO, FILTERGRAPH!"| C{{"combiner<br/>(gather N slots)"}}
-    P2 -->|"!hparGretlif ,olleH"| C
-    P3 -. "nullopt = hole" .-> C
-
-    C -->|"joined string"| Pr["Print<br/>prefix=[join]"]
-    Pr --> Out(["stdout"])
+    In(["in"]) -. "copy" .-> U["Uppercase"]
+    In -. "copy" .-> R["Reverse"]
+    In ==>|"moved"| M["MinLength<br/>minLength=100"]
+    U -->|"upper"| C{{"Concat<br/>(merge)"}}
+    R -->|"reversed"| C
+    M -. "long: empty = hole" .-> C
+    C -->|"joined"| P["Print<br/>prefix=[merge]"]
+    P --> Out(["out"])
 ```
 
 Output:
 
 ```text
-[join] HELLO, FILTERGRAPH! | !hparGretlif ,olleH (1 hole)
+[merge] HELLO, FILTERGRAPH! | !hparGretlif ,olleH (1 hole)
 ```
 
-The `MinLength=100` path drops the 19-character input, so its slot is a hole;
-the combiner skips it, joins the two transformed outputs, and notes the single
-missing path.
+The `MinLength=100` path drops the 19-character input, so its slot is a
+**hole**; the combiner skips it, joins the two transformed outputs, and notes
+the missing path. A merge is skipped only when *every* one of its edges is
+empty — then there is nothing to combine, and the drop propagates.
 
-## How construction-time validation works
+## 5. Several named outputs
 
-`AnyFilterChain` resolves each stage by name through the global
-`FilterRegistry`, then checks that consecutive stages' erased types line up
-(`outputType()` of one must equal `inputType()` of the next). `JsonFilterGraph`
-additionally validates that the chain's first `inputType()` and last
-`outputType()` match its own `InputType`/`OutputType`. Any mismatch throws at
-construction time — the pipeline fails fast, before a single message flows.
-
-```mermaid
-flowchart TD
-    Json["JSON stage array"] --> Chain["AnyFilterChain"]
-    Chain -->|"lookup by type name"| Reg[("FilterRegistry")]
-    Reg -->|"creator(config)"| Stage["AnyMessageFilter<br/>(type-erased stage)"]
-    Chain -->|"outputType == next inputType?"| Check{"types line up?"}
-    Check -->|"no"| Throw[["throw std::runtime_error"]]
-    Check -->|"yes"| Ok(["validated chain"])
-```
-
-## Pre-flight validation: collect every problem at once
-
-Construction fails fast — it throws on the *first* problem, with no location.
-When you are authoring a config, `validateGraph` is the friendlier counterpart:
-it walks the same JSON **without running any messages** and returns **all** the
-problems it finds, each carrying a JSON pointer to the offending node.
+A graph can have more than one output. `out.<key>` names each one, and the
+outputs may have different types. With `GraphOutputs` as the graph's output
+type (the default), `filter()` returns all of them:
 
 ```cpp
-#include <filterGraph/core/filterGraph/GraphValidator.hpp>
+DslFilterGraph<std::string> analysis(R"dsl(
+    in -> Uppercase -> out.upper
+    in -> Length -> out.length
+    in -> MinLength(minLength=100) -> out.long
+)dsl");
 
-for (const auto& d : filterGraph::validateGraph(config))
+auto outputs = analysis.filter(std::string{"Hello, filterGraph!"});
+std::cout << std::format("[outputs] upper={} length={} long={}\n",
+                         *outputs->get<std::string>("upper"),
+                         *outputs->get<std::size_t>("length"),
+                         outputs->has("long") ? "present" : "dropped");
+```
+
+```mermaid
+flowchart LR
+    In(["in"]) --> U["Uppercase"] --> O1(["out.upper<br/>std::string"])
+    In --> L["Length"] --> O2(["out.length<br/>std::size_t"])
+    In --> M["MinLength<br/>minLength=100"] -. "nullopt" .-> O3(["out.long<br/>(empty)"])
+```
+
+Output:
+
+```text
+[outputs] upper=HELLO, FILTERGRAPH! length=19 long=dropped
+```
+
+Outputs can also be read by position (`get<T>(1)`) or moved out (`take<T>`).
+The graph's output type decides what shape is allowed:
+
+| `OutputType` | Graph must have | `filter()` returns |
+| --- | --- | --- |
+| a concrete type (sections 3 and 4 use `int`) | exactly one `-> out` of that type | the value, or `std::nullopt` if dropped |
+| `GraphOutputs` | one or more `-> out` / `-> out.<key>` | all outputs; `std::nullopt` only if all were dropped |
+| `Void` | no outputs, only `-> end` | `Void{}` |
+
+## 6. Checking a graph before it runs
+
+Constructing a `DslFilterGraph` checks the whole graph before any message
+flows, and reports **every** problem at once, each located by `line:column`.
+`validateDslGraph` runs the same checks and returns the diagnostics instead of
+throwing:
+
+```cpp
+const auto diagnostics = validateDslGraph<std::string, int>(
+    "in -> Uppercas -> shouted -> Print -> out\n"
+    "in -> MinLength -> long -> Print -> end\n");
+
+for (const auto& diagnostic : diagnostics)
 {
-    std::cout << d.pointer << ": " << d.message << '\n';
+    std::cout << "[check] " << dsl::formatDiagnostic(diagnostic) << '\n';
 }
 ```
 
-Given a config with a typo and a nested mistake:
-
-```json
-[
-    { "type": "Uppercas" },
-    { "type": "Join", "config": { "paths": [
-        [ { "type": "Revrse" } ]
-    ] } }
-]
-```
-
-it reports both, located:
+Output:
 
 ```text
-/0: unknown filter type 'Uppercas' — did you mean 'Uppercase'? (known types: Join, Reverse, Uppercase, ...)
-/1/config/paths/0/0: unknown filter type 'Revrse' — did you mean 'Reverse'? (known types: ...)
+[check] 1:7: unknown stage type 'Uppercas' — did you mean 'Uppercase'?
+[check] 2:7: could not construct 'MinLength': [json.exception.out_of_range.403] key 'minLength' not found
 ```
 
-It catches unknown/typo'd stage types (with a nearest-name suggestion and the
-list of known types), structural mistakes (a non-object stage, a missing
-`type`, a composite's sub-paths that aren't an array), adjacent type mismatches
-between leaf stages, and bad or missing per-stage `config` (leaf stages are
-constructed to check). Two things it deliberately does **not** check: a graph's
-own declared input/output types (those live in C++ template parameters, not
-JSON), and the through-type *across* a composite stage (Fanout/Join), whose
-type is branch-/combiner-defined and not knowable from JSON alone.
+Constructing a `DslFilterGraph` from the same text throws a `GraphError` whose
+`what()` lists the same lines and whose `diagnostics()` returns them.
+
+```mermaid
+flowchart TD
+    Text["DSL text"] --> Parse["dsl::parseGraphProgram<br/>syntax, unknown names, edge wiring, cycles"]
+    Parse --> Program["GraphProgram<br/>(stages + named edges)"]
+    Program --> Build["DslFilterGraph construction"]
+    Build -->|"create(name, arguments)"| Reg[("FilterRegistry")]
+    Reg --> Check{"config ok? types match along every edge?<br/>merges, Void and outputs used correctly?"}
+    Check -->|"no"| Throw[["throw GraphError<br/>(all diagnostics)"]]
+    Check -->|"yes"| Ok(["runnable graph"])
+```
+
+What gets checked:
+
+- **Syntax** — a statement must alternate edges and stages; `in` only starts a
+  statement, `out`/`end` only end one.
+- **Names** — unknown stages, with a "did you mean" suggestion.
+- **Wiring** — an edge read but never written, written twice, or written but
+  never read; duplicate output keys; cycles.
+- **Arguments** — every stage is constructed, so bad or missing arguments are
+  reported.
+- **Types** — every edge's type must match what its reader expects, starting
+  from the graph's `InputType` at `in`. A mismatch names the stage, the edge and
+  both types (type names come from `typeid`, so their spelling depends on the
+  compiler).
+- **Fan-in and `Void`** — groups must feed merge stages, merge stages need a
+  group, and a stage producing `Void` must route to `end`.
+- **Outputs** — the number and type of outputs must fit the graph's
+  `OutputType`.
+
+### Visualizing a graph
+
+`dsl::toMermaid` renders a parsed graph as a Mermaid flowchart. For the graph in
+section 3, `dsl::toMermaid(pipeline.program())` produces:
+
+```mermaid
+flowchart LR
+    s0["Uppercase"]
+    e0(["in"])
+    e1(["shouted"])
+    s1["Print<br/>prefix=[tap] "]
+    d0[["end"]]
+    s2["Reverse"]
+    e2(["reversed"])
+    s3["MinLength<br/>minLength=3"]
+    e3(["long"])
+    s4["Print<br/>prefix=[main] "]
+    e4(["out"])
+    e0 --> s0
+    s0 --> e1
+    e1 --> s1
+    s1 --> d0
+    e0 --> s2
+    s2 --> e2
+    e2 --> s3
+    s3 --> e3
+    e3 --> s4
+    s4 --> e4
+```
+
+## 7. The same pipeline in JSON
+
+The JSON format remains supported and uses the same registered stages. JSON
+chains are linear, so branching needs composite stages: here a `Fanout`
+(registered with `registerFanoutFilter<std::string>("Fanout")`) runs a side
+branch on a copy and passes the original on — the tap from section 3:
+
+```cpp
+auto pipelineConfig = nlohmann::json::parse(R"json([
+    { "type": "Fanout", "config": { "branches": [
+        [ { "type": "Uppercase" }, { "type": "Print", "config": { "prefix": "[json tap] " } } ]
+    ] } },
+    { "type": "Reverse" },
+    { "type": "MinLength", "config": { "minLength": 3 } },
+    { "type": "Print", "config": { "prefix": "[json main] " } }
+])json");
+
+JsonFilterGraph<std::string, int> pipeline(pipelineConfig);
+pipeline.filter(std::string{"Hello, filterGraph!"});
+```
+
+Output:
+
+```text
+[json tap] HELLO, FILTERGRAPH!
+[json main] !hparGretlif ,olleH
+```
+
+How the DSL constructs map to JSON:
+
+| DSL | JSON |
+| --- | --- |
+| a second reader of an edge, ending in `end` | a `Fanout` stage with `"branches"` |
+| several readers of one edge, then `(a, b) -> Merge` | a `Join` stage (`registerJoinFilter<In, Out>`) with `"paths"` and a C++ combiner |
+| `Stage(key=value)` | `{ "type": "Stage", "config": { "key": value } }` |
+| several outputs (`out.<key>`) | not expressible; a JSON chain has one output |
+
+`validateGraph(config)` checks a JSON config without running messages and
+returns every problem, located by a JSON pointer such as `/1/config/paths/0/0`.
+Unlike the DSL checks, it cannot see the graph's declared input/output types,
+and it stops type-checking across a `Fanout` or `Join`.
 
 ## Build & run this example
 
@@ -287,3 +401,18 @@ cmake --build --preset windows-msvc-release-user-mode
 
 On Linux/macOS, use a matching preset such as `unixlike-gcc-release` or
 `unixlike-clang-release`.
+
+The complete output:
+
+```text
+[compile-time] !HPARGRETLIF ,OLLEH
+[tap] HELLO, FILTERGRAPH!
+[main] !hparGretlif ,olleH
+[tap] AB
+[merge] HELLO, FILTERGRAPH! | !hparGretlif ,olleH (1 hole)
+[outputs] upper=HELLO, FILTERGRAPH! length=19 long=dropped
+[check] 1:7: unknown stage type 'Uppercas' — did you mean 'Uppercase'?
+[check] 2:7: could not construct 'MinLength': [json.exception.out_of_range.403] key 'minLength' not found
+[json tap] HELLO, FILTERGRAPH!
+[json main] !hparGretlif ,olleH
+```
