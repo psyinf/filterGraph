@@ -231,6 +231,49 @@ flowchart TD
     Check -->|"yes"| Ok(["validated chain"])
 ```
 
+## Pre-flight validation: collect every problem at once
+
+Construction fails fast — it throws on the *first* problem, with no location.
+When you are authoring a config, `validateGraph` is the friendlier counterpart:
+it walks the same JSON **without running any messages** and returns **all** the
+problems it finds, each carrying a JSON pointer to the offending node.
+
+```cpp
+#include <filterGraph/core/filterGraph/GraphValidator.hpp>
+
+for (const auto& d : filterGraph::validateGraph(config))
+{
+    std::cout << d.pointer << ": " << d.message << '\n';
+}
+```
+
+Given a config with a typo and a nested mistake:
+
+```json
+[
+    { "type": "Uppercas" },
+    { "type": "Join", "config": { "paths": [
+        [ { "type": "Revrse" } ]
+    ] } }
+]
+```
+
+it reports both, located:
+
+```text
+/0: unknown filter type 'Uppercas' — did you mean 'Uppercase'? (known types: Join, Reverse, Uppercase, ...)
+/1/config/paths/0/0: unknown filter type 'Revrse' — did you mean 'Reverse'? (known types: ...)
+```
+
+It catches unknown/typo'd stage types (with a nearest-name suggestion and the
+list of known types), structural mistakes (a non-object stage, a missing
+`type`, a composite's sub-paths that aren't an array), adjacent type mismatches
+between leaf stages, and bad or missing per-stage `config` (leaf stages are
+constructed to check). Two things it deliberately does **not** check: a graph's
+own declared input/output types (those live in C++ template parameters, not
+JSON), and the through-type *across* a composite stage (Fanout/Join), whose
+type is branch-/combiner-defined and not knowable from JSON alone.
+
 ## Build & run this example
 
 ```powershell

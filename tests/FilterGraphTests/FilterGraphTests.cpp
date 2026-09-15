@@ -1,6 +1,7 @@
 #include <filterGraph/core/filterGraph/AnyFilterChain.hpp>
 #include <filterGraph/core/filterGraph/FanoutFilter.hpp>
 #include <filterGraph/core/filterGraph/FilterGraph.hpp>
+#include <filterGraph/core/filterGraph/GraphValidator.hpp>
 #include <filterGraph/core/filterGraph/JoinFilter.hpp>
 #include <filterGraph/core/filterGraph/JsonFilterGraph.hpp>
 #include <filterGraph/core/filterGraph/MessageFilter.hpp>
@@ -257,4 +258,101 @@ TEST_CASE("registerJoinFilter builds a join from JSON with a C++ combiner", "[Jo
     auto result  = anyJoin->filter(std::any(5));
     REQUIRE(result.has_value());
     REQUIRE(std::any_cast<int>(*result) == 30); // 5*2 + 5*2*2
+}
+
+TEST_CASE("validateGraph accepts a well-formed chain", "[GraphValidator]")
+{
+    static FilterRegistrar<DoubleFilter>   registerVDouble("VDouble");
+    static FilterRegistrar<ToStringFilter> registerVToString("VToString");
+
+    auto config = nlohmann::json::parse(R"([
+        { "type": "VDouble" },
+        { "type": "VToString" }
+    ])");
+
+    REQUIRE(validateGraph(config).empty());
+}
+
+TEST_CASE("validateGraph reports an unknown type with a suggestion and location", "[GraphValidator]")
+{
+    static FilterRegistrar<DoubleFilter> registerVDoubleSuggest("VDoubleSuggest");
+
+    auto config = nlohmann::json::parse(R"([
+        { "type": "VDoubleSuggst" }
+    ])");
+
+    auto diagnostics = validateGraph(config);
+    REQUIRE(diagnostics.size() == 1);
+    REQUIRE(diagnostics[0].pointer == "/0");
+    REQUIRE(diagnostics[0].message.find("unknown filter type 'VDoubleSuggst'") != std::string::npos);
+    REQUIRE(diagnostics[0].message.find("did you mean 'VDoubleSuggest'") != std::string::npos);
+}
+
+TEST_CASE("validateGraph reports an adjacent type mismatch", "[GraphValidator]")
+{
+    static FilterRegistrar<DoubleFilter>   registerVDoubleMm("VDoubleMm");
+    static FilterRegistrar<ToStringFilter> registerVToStringMm("VToStringMm");
+
+    // VToStringMm outputs string; VDoubleMm expects int -> mismatch at /1.
+    auto config = nlohmann::json::parse(R"([
+        { "type": "VToStringMm" },
+        { "type": "VDoubleMm" }
+    ])");
+
+    auto diagnostics = validateGraph(config);
+    REQUIRE(diagnostics.size() == 1);
+    REQUIRE(diagnostics[0].pointer == "/1");
+    REQUIRE(diagnostics[0].message.find("expects input type") != std::string::npos);
+}
+
+TEST_CASE("validateGraph reports a bad type inside a composite sub-path", "[GraphValidator]")
+{
+    static FilterRegistrar<DoubleFilter> registerVDoubleFan("VDoubleFan");
+    static const bool                    registerVFanout = [] {
+        registerFanoutFilter<int>("VFanout");
+        return true;
+    }();
+    (void)registerVFanout;
+
+    auto config = nlohmann::json::parse(R"([
+        { "type": "VFanout", "config": { "branches": [
+            [ { "type": "NopeStage" } ]
+        ] } }
+    ])");
+
+    auto diagnostics = validateGraph(config);
+    REQUIRE(diagnostics.size() == 1);
+    REQUIRE(diagnostics[0].pointer == "/0/config/branches/0/0");
+    REQUIRE(diagnostics[0].message.find("unknown filter type 'NopeStage'") != std::string::npos);
+}
+
+TEST_CASE("validateGraph reports a stage missing its type field", "[GraphValidator]")
+{
+    auto config = nlohmann::json::parse(R"([
+        { "config": { "minLength": 3 } }
+    ])");
+
+    auto diagnostics = validateGraph(config);
+    REQUIRE(diagnostics.size() == 1);
+    REQUIRE(diagnostics[0].pointer == "/0");
+    REQUIRE(diagnostics[0].message.find("missing a string \"type\"") != std::string::npos);
+}
+
+TEST_CASE("validateGraph reports bad/missing config for a leaf stage", "[GraphValidator]")
+{
+    static FilterRegistrar<DoubleFilter> registerNeedsK(
+        "NeedsK",
+        [](const nlohmann::json& config) {
+            config.at("k"); // throws if the required key is absent
+            return std::make_shared<DoubleFilter>();
+        });
+
+    auto config = nlohmann::json::parse(R"([
+        { "type": "NeedsK" }
+    ])");
+
+    auto diagnostics = validateGraph(config);
+    REQUIRE(diagnostics.size() == 1);
+    REQUIRE(diagnostics[0].pointer == "/0");
+    REQUIRE(diagnostics[0].message.find("could not construct 'NeedsK'") != std::string::npos);
 }
