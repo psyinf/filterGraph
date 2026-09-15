@@ -1,44 +1,44 @@
 # filterGraph
 
 A small, header-only C++20 library for building message/data processing
-pipelines out of composable filter stages � both at **compile time** (fully
+pipelines out of composable filter stages — both at **compile time** (fully
 type-safe, zero-overhead composition) and at **runtime** (JSON-configured,
 type-erased, with validation at construction time).
 
 It grew out of a need to turn a fixed sequence of transformation steps into a
 flexible, reconfigurable **filter graph**: chain stages, fan out to multiple
-parallel branches, and drop/short-circuit messages � all without hard-coding
+parallel branches, and drop/short-circuit messages — all without hard-coding
 the pipeline shape in source code.
 
 ## Features
 
-- **`MessageFilter<InputType, OutputType>`** � the base stage interface. A
+- **`MessageFilter<InputType, OutputType>`** — the base stage interface. A
   filter consumes `InputType&&` and returns `std::optional<OutputType>`;
   returning `std::nullopt` short-circuits (drops) the message, terminating
   the chain early.
-- **`FilterGraph<Filters...>`** � compile-time, variadic-template composition
+- **`FilterGraph<Filters...>`** — compile-time, variadic-template composition
   of stages. Fully type-checked at compile time; each stage's `OutType` must
   match the next stage's `InType`. Zero runtime configuration overhead.
-- **`AnyMessageFilter`** / **`AnyMessageFilterAdapter<Filter>`** � type-erased
+- **`AnyMessageFilter`** / **`AnyMessageFilterAdapter<Filter>`** — type-erased
   view of a `MessageFilter`, used to store/chain stages of different
   (otherwise incompatible) types at runtime.
-- **`FilterRegistry`** / **`FilterRegistrar<FilterImpl>`** � a global registry
+- **`FilterRegistry`** / **`FilterRegistrar<FilterImpl>`** — a global registry
   mapping string names to filter factories, so a runtime configuration (e.g.
   JSON) can select and construct filters by name. Supports both
   parameterless filters and filters configured from a JSON object.
-- **`AnyFilterChain`** � builds and validates a sequence of stages ("a path")
+- **`AnyFilterChain`** — builds and validates a sequence of stages ("a path")
   from a JSON array, resolving each stage via `FilterRegistry`. Fails fast at
   construction time if two consecutive stages' types don't match.
-- **`JsonFilterGraph<InputType, OutputType>`** � a typed wrapper around
+- **`JsonFilterGraph<InputType, OutputType>`** — a typed wrapper around
   `AnyFilterChain`, exposing it as a regular `MessageFilter<InputType,
   OutputType>` so a JSON-configured pipeline can be used anywhere a
   compile-time one can.
-- **`FanoutFilter<InputType>`** � duplicates an incoming message across
+- **`FanoutFilter<InputType>`** — duplicates an incoming message across
   multiple independent, multi-stage branches (side-effecting "taps": logging,
   forwarding, metrics, ...), then passes the *original* message through
   unchanged to the rest of the chain. Each branch is itself an
   `AnyFilterChain`, so branches can have several stages, not just one.
-- **`SinkFilter<InputType>`** � a generic terminal stage that forwards data to
+- **`SinkFilter<InputType>`** — a generic terminal stage that forwards data to
   a caller-supplied `std::function` callback and returns a simple status
   code, useful for terminating a compile-time `FilterGraph`.
 
