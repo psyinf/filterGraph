@@ -10,6 +10,10 @@ flexible, reconfigurable **filter graph**: chain stages, fan out to multiple
 parallel branches, and drop/short-circuit messages — all without hard-coding
 the pipeline shape in source code.
 
+> **New here? Start with the [example walkthrough (EXAMPLE.md)](EXAMPLE.md)** —
+> a step-by-step, diagrammed tour of the runnable
+> [`apps/textPipeline`](apps/textPipeline/main.cpp) sample.
+
 ## At a glance
 
 A pipeline is a chain of `MessageFilter` stages: each consumes a value and
@@ -178,9 +182,11 @@ auto result = pipeline.filter(21); // branch logs "[log] 21"; main path -> "42"
 The fanout branch observes the *original* input (`21`) as a side effect, while
 the main path keeps flowing and produces the transformed result (`"42"`).
 
-See `apps/textPipeline` for a complete, runnable example (a small text
-pipeline: uppercase/reverse/print, with a JSON-configured variant including a
-fanout branch and a length-based filter).
+**For a complete, diagrammed walkthrough of these concepts, see
+[EXAMPLE.md](EXAMPLE.md).** It builds on the runnable
+[`apps/textPipeline`](apps/textPipeline/main.cpp) sample (a small text pipeline:
+uppercase/reverse/print, with a JSON-configured variant including a fanout
+branch and a length-based filter).
 
 ## JSON pipeline schema
 
