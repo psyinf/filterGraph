@@ -1,7 +1,9 @@
+#include <filterGraph/core/filterGraph/AnyFilterChain.hpp>
 #include <filterGraph/core/filterGraph/FanoutFilter.hpp>
 #include <filterGraph/core/filterGraph/FilterGraph.hpp>
 #include <filterGraph/core/filterGraph/JsonFilterGraph.hpp>
 #include <filterGraph/core/filterGraph/MessageFilter.hpp>
+#include <filterGraph/core/filterGraph/Void.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -41,6 +43,17 @@ public:
             return std::nullopt;
         }
         return value;
+    }
+};
+
+// Side-effect-only terminal stage: consumes an int and produces Void,
+// explicitly declaring that the path ends here.
+class VoidSinkFilter : public MessageFilter<int, Void>
+{
+public:
+    std::optional<Void> filter(int&& /*value*/) override
+    {
+        return Void{};
     }
 };
 
@@ -111,4 +124,31 @@ TEST_CASE("FanoutFilter duplicates to branches and passes original through", "[F
     auto result = fanout->filter(5);
     REQUIRE(result.has_value());
     REQUIRE(*result == 5); // original value passed through unchanged
+}
+
+TEST_CASE("JsonFilterGraph builds a Void-terminated path", "[Void]")
+{
+    static FilterRegistrar<DoubleFilter>   registerDoubleVoid("DoubleVoid");
+    static FilterRegistrar<VoidSinkFilter> registerVoidSink("VoidSink");
+
+    auto config = nlohmann::json::parse(R"([
+        { "type": "DoubleVoid" },
+        { "type": "VoidSink" }
+    ])");
+
+    JsonFilterGraph<int, Void> graph(config);
+    REQUIRE(graph.filter(7).has_value());
+}
+
+TEST_CASE("AnyFilterChain rejects a stage after a terminal Void stage", "[Void]")
+{
+    static FilterRegistrar<VoidSinkFilter> registerVoidSink2("VoidSink2");
+    static FilterRegistrar<DoubleFilter>   registerDoubleAfterVoid("DoubleAfterVoid");
+
+    auto config = nlohmann::json::parse(R"([
+        { "type": "VoidSink2" },
+        { "type": "DoubleAfterVoid" }
+    ])");
+
+    REQUIRE_THROWS_AS(AnyFilterChain(config), std::runtime_error);
 }
