@@ -2,6 +2,7 @@
 
 #include <filterGraph/core/filterGraph/AnyMessageFilter.hpp>
 #include <filterGraph/core/filterGraph/FilterRegistry.hpp>
+#include <filterGraph/core/filterGraph/Void.hpp>
 
 #include <nlohmann/json.hpp>
 
@@ -41,6 +42,13 @@ public:
             nlohmann::json    config = stageConfig.contains("config") ? stageConfig.at("config") : nlohmann::json::object();
 
             auto stage = FilterRegistry::instance().create(name, config);
+
+            if (!mStages.empty() && mStages.back()->outputType() == std::type_index(typeid(Void)))
+            {
+                throw std::runtime_error(std::format(
+                    "AnyFilterChain: stage '{}' cannot follow a terminal Void stage; a Void stage must be the last stage in a path",
+                    name));
+            }
 
             if (!mStages.empty() && stage->inputType() != mStages.back()->outputType())
             {

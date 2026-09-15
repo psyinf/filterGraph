@@ -54,6 +54,13 @@ See [EXAMPLE.md](EXAMPLE.md) for a full, diagrammed walkthrough of the runnable
   whether to emit `std::nullopt` itself and never has to handle one as input.
   Inside a `FanoutFilter` branch this termination is local to that branch and
   does not affect the main path (the branch result is discarded regardless).
+- **`Void`** — an explicit terminal marker type. A path normally ends in a
+  stage that produces a real `OutputType` (the graph's result). Declaring a
+  stage `MessageFilter<InputType, Void>` instead marks the path as a pure
+  side-effect *sink*: it produces no consumable output, distinct from returning
+  `std::nullopt`, which means a message was *dropped* or could not be processed.
+  A `Void` stage must be the last stage in a path; `AnyFilterChain` rejects any
+  stage placed after it at construction time.
 - **`FilterGraph<Filters...>`** — compile-time, variadic-template composition
   of stages. Fully type-checked at compile time; each stage's `OutType` must
   match the next stage's `InType`. Zero runtime configuration overhead.
@@ -67,6 +74,12 @@ See [EXAMPLE.md](EXAMPLE.md) for a full, diagrammed walkthrough of the runnable
 - **`AnyFilterChain`** — builds and validates a sequence of stages ("a path")
   from a JSON array, resolving each stage via `FilterRegistry`. Fails fast at
   construction time if two consecutive stages' types don't match.
+- **`validateGraph(json)` / `Diagnostic`** — pre-flight validation for a config.
+  It walks the JSON *without running any messages* and returns **all** problems
+  at once (not just the first), each located by a JSON pointer: unknown/typo'd
+  stage types (with a nearest-name suggestion), structural mistakes, adjacent
+  leaf type mismatches, and bad/missing per-stage `config`. Complements the
+  fail-fast construction-time check with author-friendly, located diagnostics.
 - **`JsonFilterGraph<InputType, OutputType>`** — a typed wrapper around
   `AnyFilterChain`, exposing it as a regular `MessageFilter<InputType,
   OutputType>` so a JSON-configured pipeline can be used anywhere a
@@ -105,7 +118,7 @@ nlohmann/json.
 CPMAddPackage(
     NAME filterGraph
     GITHUB_REPOSITORY "psyinf/filterGraph"
-    GIT_TAG v0.1.0 # or main
+    GIT_TAG v0.2.0 # or main
 )
 
 target_link_libraries(myTarget PRIVATE filterGraph::filterGraph)
@@ -230,6 +243,38 @@ Branches are side-effect-only: each receives a copy of the message and its
 result is discarded, so no branch contributes to the pipeline's output (the
 fanout always forwards the unchanged original downstream).
 
+### Validating a config
+
+Construction throws on the first error with no location, which is awkward while
+authoring. `validateGraph` checks a config up front — without running any
+messages — and returns *every* problem it finds, each with a JSON pointer:
+
+```cpp
+#include <filterGraph/core/filterGraph/GraphValidator.hpp>
+
+auto diagnostics = filterGraph::validateGraph(config);
+for (const auto& d : diagnostics)
+{
+    std::cerr << d.pointer << ": " << d.message << '\n';
+}
+if (diagnostics.empty()) { /* safe to build the JsonFilterGraph */ }
+```
+
+Example output for a config with a typo and a nested mistake:
+
+```text
+/0: unknown filter type 'Uppercas' — did you mean 'Uppercase'? (known types: ...)
+/1/config/paths/0/0: unknown filter type 'Revrse' — did you mean 'Reverse'? (known types: ...)
+```
+
+It detects unknown/typo'd `type` names (with a nearest-name suggestion and the
+list of known types), structural errors (non-object stage, missing `type`, a
+composite's sub-paths not being an array), adjacent leaf type mismatches, and
+bad/missing per-stage `config` (leaf stages are constructed to check). It does
+**not** check a graph's declared input/output types (those are C++ template
+parameters, not JSON), and type-chaining pauses across a composite stage
+(`Fanout`/`Join`), whose through-type is not knowable from JSON alone.
+
 ## Building & testing
 
 The repository ships a set of CMake presets (see
@@ -274,7 +319,9 @@ Planned improvements, not yet implemented:
   message. It should record the index/name of the stage that returned
   `std::nullopt` (and expose it to the caller, e.g. via an accessor or a
   richer result type) so callers can observe and diagnose where a message was
-  filtered out.
+  filtered out. (The `Void` type already distinguishes an *intentional*
+  dead-end from a dropped message; this item covers observing *unintentional*
+  drops.)
 
 ## License
 

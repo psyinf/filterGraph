@@ -19,3 +19,15 @@ CPMAddPackage(
     OPTIONS
     "JSON_BuildTests OFF"
 )
+
+CPMAddPackage(
+    NAME lexy
+    GITHUB_REPOSITORY "foonathan/lexy"
+    GIT_TAG v2025.05.0
+    OPTIONS
+    "LEXY_BUILD_EXAMPLES OFF"
+    "LEXY_BUILD_TESTS OFF"
+    "LEXY_BUILD_BENCHMARKS OFF"
+    "LEXY_BUILD_DOCS OFF"
+    "LEXY_BUILD_PACKAGE OFF"
+)

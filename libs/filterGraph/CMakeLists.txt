@@ -5,6 +5,7 @@ add_library(${PROJECT_NAME}::${PROJECT_NAME} ALIAS ${PROJECT_NAME})
 
 target_sources(${PROJECT_NAME}
     INTERFACE
+    core/filterGraph/Void.hpp
     core/filterGraph/MessageFilter.hpp
     core/filterGraph/FilterGraph.hpp
     core/filterGraph/AnyMessageFilter.hpp
@@ -17,6 +18,7 @@ target_sources(${PROJECT_NAME}
 target_link_libraries(${PROJECT_NAME}
     INTERFACE
         nlohmann_json::nlohmann_json
+        foonathan::lexy::core
 )
 
 target_include_directories(
@@ -27,3 +29,4 @@ target_include_directories(
 )
 
 target_compile_features(${PROJECT_NAME} INTERFACE cxx_std_20)
+

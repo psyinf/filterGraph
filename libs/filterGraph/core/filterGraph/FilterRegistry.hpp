@@ -11,6 +11,7 @@
 #include <string>
 #include <typeindex>
 #include <unordered_map>
+#include <vector>
 
 namespace filterGraph {
 
@@ -43,6 +44,22 @@ public:
             throw std::runtime_error("FilterRegistry: unknown filter type '" + name + "'");
         }
         return it->second(config);
+    }
+
+    bool contains(const std::string& name) const
+    {
+        return mCreators.find(name) != mCreators.end();
+    }
+
+    std::vector<std::string> registeredNames() const
+    {
+        std::vector<std::string> names;
+        names.reserve(mCreators.size());
+        for (const auto& [name, creator] : mCreators)
+        {
+            names.push_back(name);
+        }
+        return names;
     }
 
 private:
