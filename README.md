@@ -14,6 +14,14 @@ the pipeline shape in source code.
 > a step-by-step, diagrammed tour of the runnable
 > [`apps/textPipeline`](apps/textPipeline/main.cpp) sample.
 
+> **A note on the word "filter".** Here "filter" follows the Unix-pipeline and
+> media-graph (DirectShow / GStreamer / FFmpeg) tradition: a stage that reads a
+> value and writes a transformed one, not merely a predicate that keeps or
+> drops. A `MessageFilter` therefore *transforms* (its input and output types
+> may differ), and may *optionally* drop a message via `std::nullopt`. If you
+> expect "filter" in the strict select-only sense, read it as "stage" or
+> "processing step".
+
 ## At a glance
 
 A pipeline is a chain of `MessageFilter` stages: each consumes a value and
