@@ -4,19 +4,24 @@
 //  - FilterGraph: compile-time chaining of stages
 //  - FanoutFilter + FilterRegistry + JsonFilterGraph: a runtime, JSON
 //    configured pipeline with a parallel branch ("tap")
+//  - JoinFilter: scatter-gather, the mirror of Fanout (N paths -> 1 output)
 #include <filterGraph/core/filterGraph/FanoutFilter.hpp>
 #include <filterGraph/core/filterGraph/FilterGraph.hpp>
+#include <filterGraph/core/filterGraph/JoinFilter.hpp>
 #include <filterGraph/core/filterGraph/JsonFilterGraph.hpp>
 #include <filterGraph/core/filterGraph/MessageFilter.hpp>
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <any>
 #include <cctype>
+#include <format>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 using filterGraph::FanoutFilter;
 using filterGraph::FilterGraph;
@@ -24,6 +29,7 @@ using filterGraph::FilterRegistrar;
 using filterGraph::JsonFilterGraph;
 using filterGraph::MessageFilter;
 using filterGraph::registerFanoutFilter;
+using filterGraph::registerJoinFilter;
 
 // --- Stages -----------------------------------------------------------
 
@@ -111,6 +117,34 @@ static const bool sRegisterFanout = [] {
     return true;
 }();
 
+// The Join combiner lives in C++ (it cannot be expressed in JSON): it gathers
+// one slot per path (empty slots are "holes" left by paths that dropped their
+// message via std::nullopt), concatenates the present outputs with " | ", and
+// reports how many holes it saw.
+static const bool sRegisterJoin = [] {
+    registerJoinFilter<std::string, std::string>(
+        "Join",
+        [](std::vector<std::any>&& outputs) -> std::optional<std::string> {
+            std::string joined;
+            std::size_t holes = 0;
+            for (auto& out : outputs)
+            {
+                if (!out.has_value())
+                {
+                    ++holes;
+                    continue;
+                }
+                if (!joined.empty())
+                {
+                    joined += " | ";
+                }
+                joined += std::any_cast<std::string>(out);
+            }
+            return joined + std::format(" ({} hole{})", holes, holes == 1 ? "" : "s");
+        });
+    return true;
+}();
+
 int main()
 {
     // 1) Compile-time pipeline: FilterGraph<Uppercase, Reverse, Print>
@@ -140,6 +174,25 @@ int main()
         JsonFilterGraph<std::string, int> pipeline(pipelineConfig);
         pipeline.filter(std::string{"Hello, filterGraph!"});
         pipeline.filter(std::string{"ab"}); // dropped by MinLength on the main path
+    }
+
+    // 3) Join (scatter-gather): the mirror of Fanout. The SAME input is
+    //    scattered (copied) through N independent paths; a C++ combiner then
+    //    gathers their outputs into one. Here two paths transform the text
+    //    (uppercase, reverse) and a third drops it (MinLength=100), leaving a
+    //    hole the combiner can see and report.
+    {
+        auto joinConfig = nlohmann::json::parse(R"([
+            { "type": "Join", "config": { "paths": [
+                [ { "type": "Uppercase" } ],
+                [ { "type": "Reverse" } ],
+                [ { "type": "MinLength", "config": { "minLength": 100 } } ]
+            ] } },
+            { "type": "Print", "config": { "prefix": "[join] " } }
+        ])");
+
+        JsonFilterGraph<std::string, int> pipeline(joinConfig);
+        pipeline.filter(std::string{"Hello, filterGraph!"});
     }
 
     return 0;
