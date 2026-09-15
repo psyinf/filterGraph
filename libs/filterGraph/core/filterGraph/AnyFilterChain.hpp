@@ -64,6 +64,8 @@ public:
             auto result = stage->filter(std::move(current));
             if (!result)
             {
+                // TODO(roadmap): record which stage short-circuited (index/name)
+                // and expose it to the caller instead of returning a bare nullopt.
                 return std::nullopt;
             }
             current = std::move(*result);
