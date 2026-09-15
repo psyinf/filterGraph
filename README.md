@@ -54,6 +54,13 @@ See [EXAMPLE.md](EXAMPLE.md) for a full, diagrammed walkthrough of the runnable
   whether to emit `std::nullopt` itself and never has to handle one as input.
   Inside a `FanoutFilter` branch this termination is local to that branch and
   does not affect the main path (the branch result is discarded regardless).
+- **`Void`** — an explicit terminal marker type. A path normally ends in a
+  stage that produces a real `OutputType` (the graph's result). Declaring a
+  stage `MessageFilter<InputType, Void>` instead marks the path as a pure
+  side-effect *sink*: it produces no consumable output, distinct from returning
+  `std::nullopt`, which means a message was *dropped* or could not be processed.
+  A `Void` stage must be the last stage in a path; `AnyFilterChain` rejects any
+  stage placed after it at construction time.
 - **`FilterGraph<Filters...>`** — compile-time, variadic-template composition
   of stages. Fully type-checked at compile time; each stage's `OutType` must
   match the next stage's `InType`. Zero runtime configuration overhead.
@@ -274,7 +281,9 @@ Planned improvements, not yet implemented:
   message. It should record the index/name of the stage that returned
   `std::nullopt` (and expose it to the caller, e.g. via an accessor or a
   richer result type) so callers can observe and diagnose where a message was
-  filtered out.
+  filtered out. (The `Void` type already distinguishes an *intentional*
+  dead-end from a dropped message; this item covers observing *unintentional*
+  drops.)
 
 ## License
 

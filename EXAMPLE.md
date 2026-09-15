@@ -22,6 +22,14 @@ responsibility is deciding whether to emit `std::nullopt` themselves. Within a
 `FanoutFilter` branch the same rule applies, but the termination is confined to
 that branch and never reaches the main path.
 
+A stage's last `OutputType` is normally the graph's own result: a path
+typically ends in a stage that produces a real value (e.g. `JsonFilterGraph<In,
+Out>` yields an `Out`). A stage may instead declare `MessageFilter<InputType,
+Void>` to mark the path as a pure side-effect *sink* — it deliberately produces
+no consumable output, so the path ends there. This is distinct from
+`std::nullopt`, which means a single message was dropped or could not be
+processed. A `Void` stage must be the last stage in a path.
+
 ```mermaid
 flowchart LR
     In(["input: InType"]) --> A["Stage A<br/>MessageFilter&lt;In, Mid&gt;"]
