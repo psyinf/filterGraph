@@ -1,6 +1,7 @@
 #include <filterGraph/core/filterGraph/AnyFilterChain.hpp>
 #include <filterGraph/core/filterGraph/FanoutFilter.hpp>
 #include <filterGraph/core/filterGraph/FilterGraph.hpp>
+#include <filterGraph/core/filterGraph/JoinFilter.hpp>
 #include <filterGraph/core/filterGraph/JsonFilterGraph.hpp>
 #include <filterGraph/core/filterGraph/MessageFilter.hpp>
 #include <filterGraph/core/filterGraph/Void.hpp>
@@ -151,4 +152,109 @@ TEST_CASE("AnyFilterChain rejects a stage after a terminal Void stage", "[Void]"
     ])");
 
     REQUIRE_THROWS_AS(AnyFilterChain(config), std::runtime_error);
+}
+
+TEST_CASE("JoinFilter scatters one message through N paths and combines outputs", "[JoinFilter]")
+{
+    static FilterRegistrar<DoubleFilter> registerDoubleJoin("DoubleJoin");
+
+    // Sum the two path outputs: input x -> path1 (x*2) + path2 (x*2*2) = 6x.
+    auto join = std::make_shared<JoinFilter<int, int>>(
+        [](std::vector<std::any>&& outputs) -> std::optional<int> {
+            int sum = 0;
+            for (auto& out : outputs)
+            {
+                if (out.has_value())
+                {
+                    sum += std::any_cast<int>(out);
+                }
+            }
+            return sum;
+        });
+
+    auto path1 = nlohmann::json::parse(R"([ { "type": "DoubleJoin" } ])");
+    auto path2 = nlohmann::json::parse(R"([ { "type": "DoubleJoin" }, { "type": "DoubleJoin" } ])");
+    join->addPath(std::make_shared<AnyFilterChain>(path1));
+    join->addPath(std::make_shared<AnyFilterChain>(path2));
+
+    auto result = join->filter(5);
+    REQUIRE(result.has_value());
+    REQUIRE(*result == 30); // 5*2 + 5*2*2
+}
+
+TEST_CASE("JoinFilter leaves a hole when a path drops the message", "[JoinFilter]")
+{
+    static FilterRegistrar<DoubleFilter>  registerDoubleHole("DoubleHole");
+    static FilterRegistrar<DropOddFilter> registerDropOddHole("DropOddHole");
+
+    // The combiner records which slots arrived and which are holes.
+    bool secondPathIsHole = false;
+    auto join             = std::make_shared<JoinFilter<int, int>>(
+        [&](std::vector<std::any>&& outputs) -> std::optional<int> {
+            secondPathIsHole = !outputs.at(1).has_value();
+            return outputs.at(0).has_value() ? std::optional<int>(std::any_cast<int>(outputs.at(0))) : std::nullopt;
+        });
+
+    auto path1 = nlohmann::json::parse(R"([ { "type": "DoubleHole" } ])");
+    auto path2 = nlohmann::json::parse(R"([ { "type": "DropOddHole" } ])"); // drops odd input
+    join->addPath(std::make_shared<AnyFilterChain>(path1));
+    join->addPath(std::make_shared<AnyFilterChain>(path2));
+
+    auto result = join->filter(3); // odd: path2 drops -> hole
+    REQUIRE(result.has_value());
+    REQUIRE(*result == 6);
+    REQUIRE(secondPathIsHole);
+}
+
+TEST_CASE("JoinFilter rejects a Void-terminated path", "[JoinFilter]")
+{
+    static FilterRegistrar<VoidSinkFilter> registerVoidSinkJoin("VoidSinkJoin");
+
+    auto join = std::make_shared<JoinFilter<int, int>>(
+        [](std::vector<std::any>&&) -> std::optional<int> { return 0; });
+
+    auto voidPath = nlohmann::json::parse(R"([ { "type": "VoidSinkJoin" } ])");
+    REQUIRE_THROWS_AS(join->addPath(std::make_shared<AnyFilterChain>(voidPath)), std::runtime_error);
+}
+
+TEST_CASE("JoinFilter rejects a path whose input type differs from the join input", "[JoinFilter]")
+{
+    static FilterRegistrar<ToStringFilter> registerToStringJoin("ToStringJoin");
+
+    // Join scatters int, but the path expects int and outputs string; input
+    // type matches, so instead build a join over a mismatched input type.
+    auto join = std::make_shared<JoinFilter<std::string, std::string>>(
+        [](std::vector<std::any>&&) -> std::optional<std::string> { return std::string{}; });
+
+    auto intPath = nlohmann::json::parse(R"([ { "type": "ToStringJoin" } ])"); // expects int
+    REQUIRE_THROWS_AS(join->addPath(std::make_shared<AnyFilterChain>(intPath)), std::runtime_error);
+}
+
+TEST_CASE("registerJoinFilter builds a join from JSON with a C++ combiner", "[JoinFilter]")
+{
+    static FilterRegistrar<DoubleFilter> registerDoubleRegJoin("DoubleRegJoin");
+
+    registerJoinFilter<int, int>("SumJoin", [](std::vector<std::any>&& outputs) -> std::optional<int> {
+        int sum = 0;
+        for (auto& out : outputs)
+        {
+            if (out.has_value())
+            {
+                sum += std::any_cast<int>(out);
+            }
+        }
+        return sum;
+    });
+
+    auto config = nlohmann::json::parse(R"({
+        "paths": [
+            [ { "type": "DoubleRegJoin" } ],
+            [ { "type": "DoubleRegJoin" }, { "type": "DoubleRegJoin" } ]
+        ]
+    })");
+
+    auto anyJoin = FilterRegistry::instance().create("SumJoin", config);
+    auto result  = anyJoin->filter(std::any(5));
+    REQUIRE(result.has_value());
+    REQUIRE(std::any_cast<int>(*result) == 30); // 5*2 + 5*2*2
 }
