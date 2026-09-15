@@ -32,16 +32,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each dead end its own node, and lists stage arguments.
 - DSL stages written without arguments now receive an empty config object
   instead of `null`, matching JSON stages without `"config"`.
-- `dsl::parseGraphProgramLexy` now reports the same located, descriptive
-  diagnostics as `parseGraphProgram` (previously every problem was a bare
-  "syntax error" at column 1), gives stages their real columns, and supports
-  decimal numbers, string escapes and `#` inside strings. Tests check both
-  parsers against each other.
-- Both DSL parsers: syntax errors say what was expected and what was found; a
-  syntax error ends its statement instead of producing follow-on errors; an
-  unterminated string no longer swallows the following lines; malformed or
-  out-of-range numbers and empty fan-in groups `()` are reported; messages say
-  "argument" instead of "config"; diagnostics are sorted by location.
+- `dsl::parseGraphProgram` now uses the lexy-based parser, which moved into
+  `GraphLang.hpp`. It reports located, descriptive diagnostics (the lexy parser
+  used to report every problem as a bare "syntax error" at column 1), gives
+  stages their real columns, and supports decimal numbers, string escapes and
+  `#` inside strings. `GraphLangLexy.hpp` / `parseGraphProgramLexy` remain as
+  an alias.
+- DSL syntax errors say what was expected and what was found; a syntax error
+  ends its statement instead of producing follow-on errors; an unterminated
+  string no longer swallows the following lines; malformed or out-of-range
+  numbers and empty fan-in groups `()` are reported; messages say "argument"
+  instead of "config"; diagnostics are sorted by location.
+
+### Deprecated
+- The hand-written DSL parser. It moved to `GraphLangHandwritten.hpp` as
+  `dsl::parseGraphProgramHandwritten`, marked `[[deprecated]]`, and will be
+  removed in a future release. It produces the same results as
+  `dsl::parseGraphProgram`; the tests check the two against each other.
 
 ## [0.2.0] - 2026-09-15
 

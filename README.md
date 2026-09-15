@@ -90,9 +90,9 @@ drops the message, and everything downstream of that edge is skipped.
   returned as a list of `line:column` diagnostics instead of a thrown
   **`GraphError`**.
 - **`dsl::parseGraphProgram`** / **`dsl::toMermaid`** — parse a graph into its
-  node/edge form and render it as a Mermaid flowchart. (`dsl::parseGraphProgramLexy`
-  is an alternative parser built on [lexy](https://github.com/foonathan/lexy)
-  that produces the same form and the same diagnostics.)
+  node/edge form and render it as a Mermaid flowchart. The parser is built on
+  [lexy](https://github.com/foonathan/lexy); the earlier hand-written parser is
+  deprecated (`dsl::parseGraphProgramHandwritten` in `GraphLangHandwritten.hpp`).
 
 ### JSON format (still supported)
 

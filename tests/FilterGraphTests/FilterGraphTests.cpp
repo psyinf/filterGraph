@@ -3,6 +3,7 @@
 #include <filterGraph/core/filterGraph/FanoutFilter.hpp>
 #include <filterGraph/core/filterGraph/FilterGraph.hpp>
 #include <filterGraph/core/filterGraph/GraphLang.hpp>
+#include <filterGraph/core/filterGraph/GraphLangHandwritten.hpp>
 #include <filterGraph/core/filterGraph/GraphLangLexy.hpp>
 #include <filterGraph/core/filterGraph/GraphValidator.hpp>
 #include <filterGraph/core/filterGraph/JoinFilter.hpp>
@@ -944,12 +945,24 @@ std::string describeProgram(const dsl::GraphProgram& program)
     return text;
 }
 
-// Parses `source` with both front-ends, requires identical results, and returns
-// the diagnostics.
+// Parses `source` with the lexy parser and the deprecated hand-written parser,
+// requires identical results, and returns the diagnostics.
 std::vector<dsl::TextDiagnostic> parseWithBoth(std::string_view source)
 {
-    const auto handWritten = dsl::parseGraphProgram(source);
-    const auto lexy        = dsl::parseGraphProgramLexy(source);
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    const auto handWritten = dsl::parseGraphProgramHandwritten(source);
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+    const auto lexy = dsl::parseGraphProgram(source);
     REQUIRE(describeProgram(lexy) == describeProgram(handWritten));
     return lexy.diagnostics;
 }

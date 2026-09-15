@@ -18,6 +18,7 @@ target_sources(${PROJECT_NAME}
     core/filterGraph/GraphValidator.hpp
     core/filterGraph/GraphLang.hpp
     core/filterGraph/GraphLangLexy.hpp
+    core/filterGraph/GraphLangHandwritten.hpp
     core/filterGraph/DslFilterGraph.hpp
 )
 
