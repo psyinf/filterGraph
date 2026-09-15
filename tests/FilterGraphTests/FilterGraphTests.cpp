@@ -1,6 +1,7 @@
 #include <filterGraph/core/filterGraph/AnyFilterChain.hpp>
 #include <filterGraph/core/filterGraph/FanoutFilter.hpp>
 #include <filterGraph/core/filterGraph/FilterGraph.hpp>
+#include <filterGraph/core/filterGraph/GraphLang.hpp>
 #include <filterGraph/core/filterGraph/GraphValidator.hpp>
 #include <filterGraph/core/filterGraph/JoinFilter.hpp>
 #include <filterGraph/core/filterGraph/JsonFilterGraph.hpp>
@@ -9,6 +10,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -355,4 +357,148 @@ TEST_CASE("validateGraph reports bad/missing config for a leaf stage", "[GraphVa
     REQUIRE(diagnostics.size() == 1);
     REQUIRE(diagnostics[0].pointer == "/0");
     REQUIRE(diagnostics[0].message.find("could not construct 'NeedsK'") != std::string::npos);
+}
+
+TEST_CASE("parseGraphProgram parses a linear chain", "[GraphDsl]")
+{
+    static FilterRegistrar<DoubleFilter> registerDslDouble("DslDouble");
+
+    auto program = filterGraph::dsl::parseGraphProgram("in -> DslDouble -> out\n");
+    REQUIRE(program.ok());
+    REQUIRE(program.stages.size() == 1);
+    REQUIRE(program.stages[0].type == "DslDouble");
+    REQUIRE(program.stages[0].inputs == std::vector<std::string>{"in"});
+    REQUIRE(program.outputs.size() == 1);
+    REQUIRE(program.outputs[0].index == 0);
+}
+
+TEST_CASE("parseGraphProgram parses config args on a stage", "[GraphDsl]")
+{
+    static FilterRegistrar<DoubleFilter> registerDslArgs(
+        "DslArgs",
+        [](const nlohmann::json&) { return std::make_shared<DoubleFilter>(); });
+
+    auto program = filterGraph::dsl::parseGraphProgram(R"(in -> DslArgs(min=3, label="hi", flag=true) -> out)");
+    REQUIRE(program.ok());
+    REQUIRE(program.stages.size() == 1);
+    REQUIRE(program.stages[0].config.at("min").get<int>() == 3);
+    REQUIRE(program.stages[0].config.at("label").get<std::string>() == "hi");
+    REQUIRE(program.stages[0].config.at("flag").get<bool>() == true);
+}
+
+TEST_CASE("parseGraphProgram records ordered, keyed outputs", "[GraphDsl]")
+{
+    static FilterRegistrar<DoubleFilter>   registerDslText("DslText");
+    static FilterRegistrar<ToStringFilter> registerDslStats("DslStats");
+
+    auto program = filterGraph::dsl::parseGraphProgram(
+        "in -> DslText  -> out.text\n"
+        "in -> DslStats -> out.stats\n");
+    REQUIRE(program.ok());
+    REQUIRE(program.outputs.size() == 2);
+    REQUIRE(program.outputs[0].index == 0);
+    REQUIRE(program.outputs[0].key.value() == "text");
+    REQUIRE(program.outputs[1].index == 1);
+    REQUIRE(program.outputs[1].key.value() == "stats");
+}
+
+TEST_CASE("parseGraphProgram handles fan-in via a group", "[GraphDsl]")
+{
+    static FilterRegistrar<DoubleFilter> registerDslP1("DslP1");
+    static FilterRegistrar<DoubleFilter> registerDslP2("DslP2");
+    static const bool                    registerDslMerge = [] {
+        registerJoinFilter<int, int>("DslMerge",
+                                     [](std::vector<std::any>&&) -> std::optional<int> { return 0; });
+        return true;
+    }();
+    (void)registerDslMerge;
+
+    auto program = filterGraph::dsl::parseGraphProgram(
+        "in      -> DslP1 -> a\n"
+        "in      -> DslP2 -> b\n"
+        "(a, b)  -> DslMerge -> out\n");
+    REQUIRE(program.ok());
+    REQUIRE(program.stages.size() == 3);
+    const auto& merge = program.stages.back();
+    REQUIRE(merge.type == "DslMerge");
+    REQUIRE(merge.inputs == std::vector<std::string>{"a", "b"});
+}
+
+TEST_CASE("parseGraphProgram treats a stage routed to end as a dead-end", "[GraphDsl]")
+{
+    static FilterRegistrar<DoubleFilter> registerDslSink("DslSink");
+    static FilterRegistrar<DoubleFilter> registerDslMain("DslMain");
+
+    auto program = filterGraph::dsl::parseGraphProgram(
+        "in -> DslSink -> end\n"
+        "in -> DslMain -> out\n");
+    REQUIRE(program.ok());
+    REQUIRE(program.deadEnds.size() == 1);
+}
+
+TEST_CASE("parseGraphProgram reports an unknown stage with a location", "[GraphDsl]")
+{
+    auto program = filterGraph::dsl::parseGraphProgram("in -> NoSuchStage -> out\n");
+    REQUIRE_FALSE(program.ok());
+    const bool reported = std::any_of(
+        program.diagnostics.begin(), program.diagnostics.end(),
+        [](const filterGraph::dsl::TextDiagnostic& d) {
+            return d.message.find("unknown stage type 'NoSuchStage'") != std::string::npos && d.loc.line == 1;
+        });
+    REQUIRE(reported);
+}
+
+TEST_CASE("parseGraphProgram reports an undefined edge reference", "[GraphDsl]")
+{
+    static FilterRegistrar<DoubleFilter> registerDslUndef("DslUndef");
+
+    auto program = filterGraph::dsl::parseGraphProgram("missing -> DslUndef -> out\n");
+    REQUIRE_FALSE(program.ok());
+    const bool reported = std::any_of(
+        program.diagnostics.begin(), program.diagnostics.end(),
+        [](const filterGraph::dsl::TextDiagnostic& d) {
+            return d.message.find("edge 'missing' is used but never produced") != std::string::npos;
+        });
+    REQUIRE(reported);
+}
+
+TEST_CASE("parseGraphProgram reports an edge with multiple producers", "[GraphDsl]")
+{
+    static FilterRegistrar<DoubleFilter> registerDslA("DslA");
+    static FilterRegistrar<DoubleFilter> registerDslB("DslB");
+    static FilterRegistrar<DoubleFilter> registerDslC("DslC");
+
+    auto program = filterGraph::dsl::parseGraphProgram(
+        "in -> DslA -> dup\n"
+        "in -> DslB -> dup\n"
+        "dup -> DslC -> out\n");
+    REQUIRE_FALSE(program.ok());
+    const bool reported = std::any_of(
+        program.diagnostics.begin(), program.diagnostics.end(),
+        [](const filterGraph::dsl::TextDiagnostic& d) {
+            return d.message.find("is produced by 2 stages") != std::string::npos;
+        });
+    REQUIRE(reported);
+}
+
+TEST_CASE("parseGraphProgram rejects a statement without a stage", "[GraphDsl]")
+{
+    auto program = filterGraph::dsl::parseGraphProgram("in -> out\n");
+    REQUIRE_FALSE(program.ok());
+    const bool reported = std::any_of(
+        program.diagnostics.begin(), program.diagnostics.end(),
+        [](const filterGraph::dsl::TextDiagnostic& d) {
+            return d.message.find("must alternate edge -> stage -> edge") != std::string::npos;
+        });
+    REQUIRE(reported);
+}
+
+TEST_CASE("toMermaid renders the parsed graph", "[GraphDsl]")
+{
+    static FilterRegistrar<DoubleFilter> registerDslMermaid("DslMermaid");
+
+    auto program = filterGraph::dsl::parseGraphProgram("in -> DslMermaid -> out\n");
+    auto mermaid = filterGraph::dsl::toMermaid(program);
+    REQUIRE(mermaid.find("flowchart LR") != std::string::npos);
+    REQUIRE(mermaid.find("DslMermaid") != std::string::npos);
 }
