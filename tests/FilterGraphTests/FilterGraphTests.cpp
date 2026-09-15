@@ -2,6 +2,7 @@
 #include <filterGraph/core/filterGraph/FanoutFilter.hpp>
 #include <filterGraph/core/filterGraph/FilterGraph.hpp>
 #include <filterGraph/core/filterGraph/GraphLang.hpp>
+#include <filterGraph/core/filterGraph/GraphLangLexy.hpp>
 #include <filterGraph/core/filterGraph/GraphValidator.hpp>
 #include <filterGraph/core/filterGraph/JoinFilter.hpp>
 #include <filterGraph/core/filterGraph/JsonFilterGraph.hpp>
@@ -501,4 +502,133 @@ TEST_CASE("toMermaid renders the parsed graph", "[GraphDsl]")
     auto mermaid = filterGraph::dsl::toMermaid(program);
     REQUIRE(mermaid.find("flowchart LR") != std::string::npos);
     REQUIRE(mermaid.find("DslMermaid") != std::string::npos);
+}
+
+TEST_CASE("lexy parser smoke test", "[GraphDslLexy]")
+{
+    static FilterRegistrar<DoubleFilter> registerLexySmoke("LexySmoke");
+
+    auto program = filterGraph::dsl::parseGraphProgramLexy("in -> LexySmoke -> out\n");
+    REQUIRE(program.ok());
+    REQUIRE(program.stages.size() == 1);
+}
+
+TEST_CASE("parseGraphProgramLexy parses a linear chain", "[GraphDslLexy]")
+{
+    static FilterRegistrar<DoubleFilter> registerLexyDouble("LexyDouble");
+
+    auto program = filterGraph::dsl::parseGraphProgramLexy("in -> LexyDouble -> out\n");
+    REQUIRE(program.ok());
+    REQUIRE(program.stages.size() == 1);
+    REQUIRE(program.stages[0].type == "LexyDouble");
+    REQUIRE(program.stages[0].inputs == std::vector<std::string>{"in"});
+    REQUIRE(program.outputs.size() == 1);
+    REQUIRE(program.outputs[0].index == 0);
+}
+
+TEST_CASE("parseGraphProgramLexy parses config args on a stage", "[GraphDslLexy]")
+{
+    static FilterRegistrar<DoubleFilter> registerLexyArgs(
+        "LexyArgs",
+        [](const nlohmann::json&) { return std::make_shared<DoubleFilter>(); });
+
+    auto program = filterGraph::dsl::parseGraphProgramLexy(R"(in -> LexyArgs(min=3, label="hi", flag=true) -> out)");
+    REQUIRE(program.ok());
+    REQUIRE(program.stages.size() == 1);
+    REQUIRE(program.stages[0].config.at("min").get<int>() == 3);
+    REQUIRE(program.stages[0].config.at("label").get<std::string>() == "hi");
+    REQUIRE(program.stages[0].config.at("flag").get<bool>() == true);
+}
+
+TEST_CASE("parseGraphProgramLexy records ordered, keyed outputs", "[GraphDslLexy]")
+{
+    static FilterRegistrar<DoubleFilter>   registerLexyText("LexyText");
+    static FilterRegistrar<ToStringFilter> registerLexyStats("LexyStats");
+
+    auto program = filterGraph::dsl::parseGraphProgramLexy(
+        "in -> LexyText  -> out.text\n"
+        "in -> LexyStats -> out.stats\n");
+    REQUIRE(program.ok());
+    REQUIRE(program.outputs.size() == 2);
+    REQUIRE(program.outputs[0].index == 0);
+    REQUIRE(program.outputs[0].key.value() == "text");
+    REQUIRE(program.outputs[1].index == 1);
+    REQUIRE(program.outputs[1].key.value() == "stats");
+}
+
+TEST_CASE("parseGraphProgramLexy handles fan-in via a group", "[GraphDslLexy]")
+{
+    static FilterRegistrar<DoubleFilter> registerLexyP1("LexyP1");
+    static FilterRegistrar<DoubleFilter> registerLexyP2("LexyP2");
+    static const bool                    registerLexyMerge = [] {
+        registerJoinFilter<int, int>("LexyMerge",
+                                     [](std::vector<std::any>&&) -> std::optional<int> { return 0; });
+        return true;
+    }();
+    (void)registerLexyMerge;
+
+    auto program = filterGraph::dsl::parseGraphProgramLexy(
+        "in      -> LexyP1 -> a\n"
+        "in      -> LexyP2 -> b\n"
+        "(a, b)  -> LexyMerge -> out\n");
+    REQUIRE(program.ok());
+    REQUIRE(program.stages.size() == 3);
+    const auto& merge = program.stages.back();
+    REQUIRE(merge.type == "LexyMerge");
+    REQUIRE(merge.inputs == std::vector<std::string>{"a", "b"});
+}
+
+TEST_CASE("parseGraphProgramLexy treats a stage routed to end as a dead-end", "[GraphDslLexy]")
+{
+    static FilterRegistrar<DoubleFilter> registerLexySink("LexySink");
+    static FilterRegistrar<DoubleFilter> registerLexyMain("LexyMain");
+
+    auto program = filterGraph::dsl::parseGraphProgramLexy(
+        "in -> LexySink -> end\n"
+        "in -> LexyMain -> out\n");
+    REQUIRE(program.ok());
+    REQUIRE(program.deadEnds.size() == 1);
+}
+
+TEST_CASE("parseGraphProgramLexy reports an unknown stage with a location", "[GraphDslLexy]")
+{
+    auto program = filterGraph::dsl::parseGraphProgramLexy("in -> NoSuch -> out\n");
+    REQUIRE_FALSE(program.ok());
+    const bool reported = std::any_of(
+        program.diagnostics.begin(), program.diagnostics.end(),
+        [](const filterGraph::dsl::TextDiagnostic& d) {
+            return d.message.find("unknown stage type 'NoSuch'") != std::string::npos;
+        });
+    REQUIRE(reported);
+}
+
+TEST_CASE("parseGraphProgramLexy reports an undefined edge reference", "[GraphDslLexy]")
+{
+    static FilterRegistrar<DoubleFilter> registerLexyUndef("LexyUndef");
+
+    auto program = filterGraph::dsl::parseGraphProgramLexy("missing -> LexyUndef -> out\n");
+    REQUIRE_FALSE(program.ok());
+    const bool reported = std::any_of(
+        program.diagnostics.begin(), program.diagnostics.end(),
+        [](const filterGraph::dsl::TextDiagnostic& d) {
+            return d.message.find("edge 'missing' is used but never produced") != std::string::npos;
+        });
+    REQUIRE(reported);
+}
+
+TEST_CASE("parseGraphProgramLexy matches parseGraphProgram on the same input", "[GraphDslLexy]")
+{
+    static FilterRegistrar<DoubleFilter>   registerLexyParityA("LexyParityA");
+    static FilterRegistrar<ToStringFilter> registerLexyParityB("LexyParityB");
+
+    const std::string source =
+        "in -> LexyParityA -> mid\n"
+        "mid -> LexyParityB -> out.text\n"
+        "in -> LexyParityA -> out.raw\n";
+
+    auto handWritten = filterGraph::dsl::parseGraphProgram(source);
+    auto lexy        = filterGraph::dsl::parseGraphProgramLexy(source);
+
+    REQUIRE(lexy.stages.size() == handWritten.stages.size());
+    REQUIRE(lexy.outputs.size() == handWritten.outputs.size());
 }

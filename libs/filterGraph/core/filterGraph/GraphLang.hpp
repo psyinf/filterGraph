@@ -336,6 +336,107 @@ struct Term
     SourceLoc                  loc;
 };
 
+// Interprets a flat term list (edge, stage, edge, ...) into stage nodes, wiring
+// each stage's inputs from the previous edge/group and its output edge from the
+// next edge/boundary. Shared by every front-end (hand-written or lexy).
+inline void buildStatement(std::vector<Term>&           terms,
+                           GraphProgram&                program,
+                           std::size_t&                 outputIndex,
+                           std::vector<TextDiagnostic>& diags)
+{
+    if (terms.size() < 3 || (terms.size() % 2) == 0)
+    {
+        diags.push_back({terms.front().loc,
+                         "a statement must alternate edge -> stage -> edge (e.g. 'in -> Stage -> out')"});
+        return;
+    }
+
+    // Reclassify odd positions as stages (unless already a stage app).
+    for (std::size_t i = 0; i < terms.size(); ++i)
+    {
+        const bool oddPosition = (i % 2) == 1;
+        if (oddPosition)
+        {
+            if (terms[i].kind == Term::Kind::Group || terms[i].kind == Term::Kind::Boundary)
+            {
+                diags.push_back({terms[i].loc,
+                                 std::format("expected a stage at this position but found '{}'", terms[i].name)});
+                return;
+            }
+            terms[i].kind = Term::Kind::Stage;
+        }
+        else
+        {
+            if (terms[i].kind == Term::Kind::Stage)
+            {
+                diags.push_back({terms[i].loc,
+                                 std::format("unexpected stage '{}' where an edge was expected", terms[i].name)});
+                return;
+            }
+            // `in` only valid at the very start; out/end only at the very end.
+            const bool first = (i == 0);
+            const bool last  = (i + 1 == terms.size());
+            if (terms[i].name == "in" && !first)
+            {
+                diags.push_back({terms[i].loc, "'in' may only appear as the first term of a statement"});
+                return;
+            }
+            if ((terms[i].kind == Term::Kind::Boundary) && !last)
+            {
+                diags.push_back({terms[i].loc,
+                                 std::format("'{}' may only appear as the last term of a statement", terms[i].name)});
+                return;
+            }
+            if (terms[i].kind == Term::Kind::Group && !first)
+            {
+                diags.push_back({terms[i].loc, "a fan-in group may only appear as the first term of a statement"});
+                return;
+            }
+        }
+    }
+
+    // Emit one stage node per stage term, wiring input(s) from the previous
+    // edge term and the produced edge from the next edge term.
+    for (std::size_t i = 1; i < terms.size(); i += 2)
+    {
+        StageNode node;
+        node.type   = terms[i].name;
+        node.config = terms[i].config;
+        node.loc    = terms[i].loc;
+
+        const Term& source = terms[i - 1];
+        if (source.kind == Term::Kind::Group)
+        {
+            node.inputs = source.edges;
+        }
+        else
+        {
+            node.inputs = {source.name};
+        }
+
+        const Term& sink = terms[i + 1];
+        if (sink.kind == Term::Kind::Boundary && sink.name == "end")
+        {
+            const std::string deadEdge = std::format("$end{}", program.deadEnds.size());
+            program.deadEnds.push_back(deadEdge);
+            node.output = std::nullopt;
+        }
+        else if (sink.kind == Term::Kind::Boundary && sink.name == "out")
+        {
+            const std::string outEdge = std::format("$out{}", outputIndex);
+            program.outputs.push_back({outEdge, sink.key, outputIndex, sink.loc});
+            node.output = outEdge;
+            ++outputIndex;
+        }
+        else
+        {
+            node.output = sink.name; // intermediate named edge
+        }
+
+        program.stages.push_back(std::move(node));
+    }
+}
+
 class Parser
 {
 public:
@@ -361,7 +462,7 @@ public:
             auto terms = parseStatement();
             if (!terms.empty())
             {
-                buildStatement(terms, program, outputIndex);
+                buildStatement(terms, program, outputIndex, mDiagnostics);
             }
         }
 
@@ -593,102 +694,6 @@ private:
         error(token.loc, std::format("expected a config value but found '{}'", token.text));
         next();
         return nullptr;
-    }
-
-    // Interprets a flat term list (edge, stage, edge, ... ) into stage nodes.
-    void buildStatement(std::vector<Term>& terms, GraphProgram& program, std::size_t& outputIndex)
-    {
-        if (terms.size() < 3 || (terms.size() % 2) == 0)
-        {
-            error(terms.front().loc,
-                  "a statement must alternate edge -> stage -> edge (e.g. 'in -> Stage -> out')");
-            return;
-        }
-
-        // Reclassify odd positions as stages (unless already a stage app).
-        for (std::size_t i = 0; i < terms.size(); ++i)
-        {
-            const bool oddPosition = (i % 2) == 1;
-            if (oddPosition)
-            {
-                if (terms[i].kind == Term::Kind::Group || terms[i].kind == Term::Kind::Boundary)
-                {
-                    error(terms[i].loc,
-                          std::format("expected a stage at this position but found '{}'", terms[i].name));
-                    return;
-                }
-                terms[i].kind = Term::Kind::Stage;
-            }
-            else
-            {
-                if (terms[i].kind == Term::Kind::Stage)
-                {
-                    error(terms[i].loc,
-                          std::format("unexpected stage '{}' where an edge was expected", terms[i].name));
-                    return;
-                }
-                // `in` only valid at the very start; out/end only at the very end.
-                const bool first = (i == 0);
-                const bool last  = (i + 1 == terms.size());
-                if (terms[i].name == "in" && !first)
-                {
-                    error(terms[i].loc, "'in' may only appear as the first term of a statement");
-                    return;
-                }
-                if ((terms[i].kind == Term::Kind::Boundary) && !last)
-                {
-                    error(terms[i].loc, std::format("'{}' may only appear as the last term of a statement",
-                                                    terms[i].name));
-                    return;
-                }
-                if (terms[i].kind == Term::Kind::Group && !first)
-                {
-                    error(terms[i].loc, "a fan-in group may only appear as the first term of a statement");
-                    return;
-                }
-            }
-        }
-
-        // Emit one stage node per stage term, wiring input(s) from the previous
-        // edge term and the produced edge from the next edge term.
-        for (std::size_t i = 1; i < terms.size(); i += 2)
-        {
-            StageNode node;
-            node.type   = terms[i].name;
-            node.config = terms[i].config;
-            node.loc    = terms[i].loc;
-
-            const Term& source = terms[i - 1];
-            if (source.kind == Term::Kind::Group)
-            {
-                node.inputs = source.edges;
-            }
-            else
-            {
-                node.inputs = {source.name};
-            }
-
-            const Term& sink = terms[i + 1];
-            if (sink.kind == Term::Kind::Boundary && sink.name == "end")
-            {
-                const std::string deadEdge = std::format("$end{}", program.deadEnds.size());
-                program.deadEnds.push_back(deadEdge);
-                node.output = std::nullopt;
-            }
-            else if (sink.kind == Term::Kind::Boundary && sink.name == "out")
-            {
-                const std::string outEdge = std::format("$out{}", outputIndex);
-                program.outputs.push_back({outEdge, sink.key, outputIndex, sink.loc});
-                node.output = outEdge;
-                ++outputIndex;
-            }
-            else
-            {
-                node.output = sink.name; // intermediate named edge
-            }
-
-            program.stages.push_back(std::move(node));
-        }
     }
 
     std::vector<Token>          mTokens;
