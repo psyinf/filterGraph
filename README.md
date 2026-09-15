@@ -118,7 +118,7 @@ nlohmann/json.
 CPMAddPackage(
     NAME filterGraph
     GITHUB_REPOSITORY "psyinf/filterGraph"
-    GIT_TAG v0.1.0 # or main
+    GIT_TAG v0.2.0 # or main
 )
 
 target_link_libraries(myTarget PRIVATE filterGraph::filterGraph)
