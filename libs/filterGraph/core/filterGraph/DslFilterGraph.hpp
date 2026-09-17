@@ -229,6 +229,47 @@ inline std::string describeEdge(const std::string& edge)
     return std::format("edge '{}'", edge);
 }
 
+// Checks the edges of a fan-in group against the slot types the merge stage
+// declares (MergeStage); an untyped merge declares none and is not checked.
+inline void checkMergeInputs(const StageNode&                                        node,
+                             const MergeSlotTypes&                                   slots,
+                             const std::unordered_map<std::string, std::type_index>& edgeTypes,
+                             std::vector<TextDiagnostic>&                            diagnostics)
+{
+    if (slots.empty())
+    {
+        return;
+    }
+
+    if (!slots.uniform && slots.types.size() != node.inputs.size())
+    {
+        // Without a slot-to-edge correspondence, per-slot messages would only
+        // repeat this one.
+        diagnostics.push_back({node.loc,
+                               std::format("stage '{}' takes {} inputs but the group has {}",
+                                           node.type,
+                                           slots.types.size(),
+                                           node.inputs.size())});
+        return;
+    }
+
+    for (std::size_t slot = 0; slot < node.inputs.size(); ++slot)
+    {
+        const std::type_index expected = slots.uniform ? slots.types.front() : slots.types[slot];
+        const auto            type     = edgeTypes.find(node.inputs[slot]);
+        if (type != edgeTypes.end() && type->second != expected)
+        {
+            diagnostics.push_back({node.loc,
+                                   std::format("slot {} of '{}' expects '{}' but {} carries '{}'",
+                                               slot + 1,
+                                               node.type,
+                                               expected.name(),
+                                               describeEdge(node.inputs[slot]),
+                                               type->second.name())});
+        }
+    }
+}
+
 struct CompiledStage
 {
     std::shared_ptr<AnyMessageFilter> filter;
@@ -309,7 +350,11 @@ public:
                                  node.type,
                                  node.type)});
             }
-            else if (!merge)
+            else if (merge)
+            {
+                checkMergeInputs(node, filter->mergeInputTypes(), edgeTypes, diagnostics);
+            }
+            else
             {
                 const std::string& edge = node.inputs.front();
                 auto               type = edgeTypes.find(edge);

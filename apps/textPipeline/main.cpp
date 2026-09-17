@@ -31,6 +31,7 @@ using filterGraph::FilterRegistrar;
 using filterGraph::JsonFilterGraph;
 using filterGraph::MergeInputs;
 using filterGraph::MessageFilter;
+using filterGraph::TypedMergeFilter;
 using filterGraph::registerFanoutFilter;
 using filterGraph::registerMergeFilter;
 using filterGraph::validateDslGraph;
@@ -157,6 +158,21 @@ static const bool sRegisterConcat = [] {
     return true;
 }();
 
+// A typed merge stage for `(upper, length) -> Report`: it declares the type of
+// each slot, so the DSL checks the group's edges when the graph is built, and
+// the slots arrive as std::optionals (empty = a hole) instead of std::any.
+class ReportFilter : public TypedMergeFilter<std::string, std::string, std::size_t>
+{
+public:
+    std::optional<std::string> merge(std::optional<std::string>&& upper,
+                                     std::optional<std::size_t>&& length) override
+    {
+        return std::format("{} ({} chars)", upper.value_or("-"), length.value_or(0));
+    }
+};
+
+static FilterRegistrar<ReportFilter> registerReport("Report");
+
 // Only needed by the JSON example: in the DSL, fan-out is built in.
 static const bool sRegisterFanout = [] {
     registerFanoutFilter<std::string>("Fanout");
@@ -201,6 +217,27 @@ int main()
         )dsl");
 
         pipeline.filter(std::string{"Hello, filterGraph!"});
+    }
+
+    // 3b) The same fan-in with a typed merge: Report declares its slot types,
+    //     so a group in the wrong order is rejected when the graph is built
+    //     instead of throwing std::bad_any_cast on the first message.
+    {
+        DslFilterGraph<std::string, int> pipeline(R"dsl(
+            in -> Uppercase -> upper
+            in -> Length -> length
+            (upper, length) -> Report -> reported -> Print(prefix="[typed] ") -> out
+        )dsl");
+
+        pipeline.filter(std::string{"Hello, filterGraph!"});
+
+        for (const auto& diagnostic : validateDslGraph<std::string, int>(
+                 "in -> Uppercase -> upper\n"
+                 "in -> Length -> length\n"
+                 "(length, upper) -> Report -> reported -> Print -> out\n"))
+        {
+            std::cout << "[typed check] " << dsl::formatDiagnostic(diagnostic) << '\n';
+        }
     }
 
     // 4) Several named outputs of different types, returned as GraphOutputs.

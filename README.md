@@ -89,6 +89,10 @@ drops the message, and everything downstream of that edge is skipped.
 - **`MergeFilter<OutputType>`** / **`registerMergeFilter`** — fan-in stages:
   a C++ combiner turns the values of several edges into one, seeing an empty
   slot ("hole") for every edge whose path dropped the message.
+- **`TypedMergeFilter<Out, Ins...>`** / **`UniformMergeFilter<In, Out>`** /
+  **`registerTypedMergeFilter`** — fan-in stages that declare their slot types,
+  so the edges of a group are checked when the graph is built and the stage
+  receives typed `std::optional`s instead of `std::any`.
 - **`validateDslGraph<In, Out>(text)`** — the same checks as construction,
   returned as a list of `line:column` diagnostics instead of a thrown
   **`GraphError`**.
@@ -241,9 +245,10 @@ edge -> Stage -> edge -> Stage(key=value) -> edge
 - **Fan-out:** read the same edge in several statements. Every reader gets its
   own copy of the value.
 - **Fan-in:** `(a, b, c) -> Merge -> merged` gathers several edges into a merge
-  stage registered with `registerMergeFilter<OutputType>(name, combiner)`. The
-  combiner receives `MergeInputs` (`std::vector<std::any>`), one slot per edge,
-  in the order listed.
+  stage, one slot per edge, in the order listed. A merge either declares its
+  slot types (see [Typed merges](#typed-merges)) or takes them untyped as
+  `MergeInputs` (`std::vector<std::any>`), as
+  `registerMergeFilter<OutputType>(name, combiner)` does.
 - `#` starts a comment that runs to the end of the line.
 
 ### How a graph runs
@@ -259,6 +264,48 @@ For every message:
 4. A merge receives an empty slot (a "hole") for each dropped edge. It is
    skipped only when *all* of its edges are empty.
 5. Values routed to `end` are discarded.
+
+### Typed merges
+
+A merge stage may declare the type of each of its slots. The DSL then checks
+the edges of its group when the graph is built, like every other edge, instead
+of failing with a `std::bad_any_cast` on the first message — and the stage
+receives typed `std::optional`s, so it needs no `any_cast` of its own:
+
+```cpp
+// Fixed arity, one type per slot.
+class Summarize : public TypedMergeFilter<Stats, Message, Valid>
+{
+public:
+    std::optional<Stats> merge(std::optional<Message>&& message, std::optional<Valid>&& valid) override
+    {
+        return Stats{...}; // an empty optional is a hole: that path dropped the message
+    }
+};
+static FilterRegistrar<Summarize> registerSummarize("Summarize");
+
+// The same from a lambda, without a subclass.
+registerTypedMergeFilter<Stats, Message, Valid>(
+    "Summarize",
+    [](std::optional<Message>&& message, std::optional<Valid>&& valid) -> std::optional<Stats> { ... });
+
+// Any number of slots, all of one type: N variants of the same computation.
+class PickBest : public UniformMergeFilter<Candidate, Result>
+{
+public:
+    std::optional<Result> merge(std::vector<std::optional<Candidate>>&& candidates) override { ... }
+};
+```
+
+Mis-wiring a group is then a build-time diagnostic, not a wrong result:
+
+```text
+4:34: slot 2 of 'Summarize' expects 'struct Valid' but edge 'msg' carries 'struct Message'
+4:34: stage 'Summarize' takes 2 inputs but the group has 3
+```
+
+`MergeFilter` / `registerMergeFilter` declare no slot types; their edges stay
+unchecked, and the combiner reads the slots with `std::any_cast`.
 
 ### Choosing the output type
 

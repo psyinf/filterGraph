@@ -217,6 +217,56 @@ The `MinLength=100` path drops the 19-character input, so its slot is a
 the missing path. A merge is skipped only when *every* one of its edges is
 empty — then there is nothing to combine, and the drop propagates.
 
+### Typed slots
+
+`Concat` takes its slots untyped: nothing checks that the group really carries
+three strings, and swapping two edges of the same type would pass validation
+and quietly produce a different result. A merge that declares its slot types
+avoids both. `TypedMergeFilter<Out, Ins...>` fixes the number and type of the
+slots and hands them over as `std::optional`s:
+
+```cpp
+class ReportFilter : public TypedMergeFilter<std::string, std::string, std::size_t>
+{
+public:
+    std::optional<std::string> merge(std::optional<std::string>&& upper,
+                                     std::optional<std::size_t>&& length) override
+    {
+        return std::format("{} ({} chars)", upper.value_or("-"), length.value_or(0));
+    }
+};
+static FilterRegistrar<ReportFilter> registerReport("Report");
+```
+
+```cpp
+DslFilterGraph<std::string, int> pipeline(R"dsl(
+    in -> Uppercase -> upper
+    in -> Length -> length
+    (upper, length) -> Report -> reported -> Print(prefix="[typed] ") -> out
+)dsl");
+
+pipeline.filter(std::string{"Hello, filterGraph!"});
+```
+
+```text
+[typed] HELLO, FILTERGRAPH! (19 chars)
+```
+
+Writing the group the other way round is now rejected when the graph is built,
+instead of throwing `std::bad_any_cast` on the first message:
+
+```text
+3:20: slot 1 of 'Report' expects 'class std::basic_string<char,...>' but edge 'length' carries 'unsigned __int64'
+3:20: slot 2 of 'Report' expects 'unsigned __int64' but edge 'upper' carries 'class std::basic_string<char,...>'
+```
+
+(The type names come from `typeid(...).name()`, so their spelling depends on the
+compiler; they are shortened here.)
+
+`registerTypedMergeFilter<Out, Ins...>(name, lambda)` does the same from a
+lambda, and `UniformMergeFilter<In, Out>` covers the other shape: any number of
+slots, all of the same type (N variants of one computation, combined).
+
 ## 5. Several named outputs
 
 A graph can have more than one output. `out.<key>` names each one, and the
@@ -312,7 +362,9 @@ What gets checked:
   both types (type names come from `typeid`, so their spelling depends on the
   compiler).
 - **Fan-in and `Void`** — groups must feed merge stages, merge stages need a
-  group, and a stage producing `Void` must route to `end`.
+  group, and a stage producing `Void` must route to `end`. A merge that
+  declares its slot types (`TypedMergeFilter`, `UniformMergeFilter`) also has
+  the number and type of its group's edges checked.
 - **Outputs** — the number and type of outputs must fit the graph's
   `OutputType`.
 
