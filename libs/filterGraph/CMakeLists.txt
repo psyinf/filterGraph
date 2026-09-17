@@ -13,6 +13,13 @@ target_sources(${PROJECT_NAME}
     core/filterGraph/AnyFilterChain.hpp
     core/filterGraph/JsonFilterGraph.hpp
     core/filterGraph/FanoutFilter.hpp
+    core/filterGraph/JoinFilter.hpp
+    core/filterGraph/MergeFilter.hpp
+    core/filterGraph/GraphValidator.hpp
+    core/filterGraph/GraphLang.hpp
+    core/filterGraph/GraphLangLexy.hpp
+    core/filterGraph/GraphLangHandwritten.hpp
+    core/filterGraph/DslFilterGraph.hpp
 )
 
 target_link_libraries(${PROJECT_NAME}

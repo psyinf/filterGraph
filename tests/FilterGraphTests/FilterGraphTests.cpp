@@ -1,20 +1,27 @@
 #include <filterGraph/core/filterGraph/AnyFilterChain.hpp>
+#include <filterGraph/core/filterGraph/DslFilterGraph.hpp>
 #include <filterGraph/core/filterGraph/FanoutFilter.hpp>
 #include <filterGraph/core/filterGraph/FilterGraph.hpp>
 #include <filterGraph/core/filterGraph/GraphLang.hpp>
+#include <filterGraph/core/filterGraph/GraphLangHandwritten.hpp>
 #include <filterGraph/core/filterGraph/GraphLangLexy.hpp>
 #include <filterGraph/core/filterGraph/GraphValidator.hpp>
 #include <filterGraph/core/filterGraph/JoinFilter.hpp>
 #include <filterGraph/core/filterGraph/JsonFilterGraph.hpp>
+#include <filterGraph/core/filterGraph/MergeFilter.hpp>
 #include <filterGraph/core/filterGraph/MessageFilter.hpp>
 #include <filterGraph/core/filterGraph/Void.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <any>
+#include <format>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <vector>
 
 using namespace filterGraph;
 
@@ -408,8 +415,7 @@ TEST_CASE("parseGraphProgram handles fan-in via a group", "[GraphDsl]")
     static FilterRegistrar<DoubleFilter> registerDslP1("DslP1");
     static FilterRegistrar<DoubleFilter> registerDslP2("DslP2");
     static const bool                    registerDslMerge = [] {
-        registerJoinFilter<int, int>("DslMerge",
-                                     [](std::vector<std::any>&&) -> std::optional<int> { return 0; });
+        registerMergeFilter<int>("DslMerge", [](MergeInputs&&) -> std::optional<int> { return 0; });
         return true;
     }();
     (void)registerDslMerge;
@@ -561,8 +567,7 @@ TEST_CASE("parseGraphProgramLexy handles fan-in via a group", "[GraphDslLexy]")
     static FilterRegistrar<DoubleFilter> registerLexyP1("LexyP1");
     static FilterRegistrar<DoubleFilter> registerLexyP2("LexyP2");
     static const bool                    registerLexyMerge = [] {
-        registerJoinFilter<int, int>("LexyMerge",
-                                     [](std::vector<std::any>&&) -> std::optional<int> { return 0; });
+        registerMergeFilter<int>("LexyMerge", [](MergeInputs&&) -> std::optional<int> { return 0; });
         return true;
     }();
     (void)registerLexyMerge;
@@ -631,4 +636,399 @@ TEST_CASE("parseGraphProgramLexy matches parseGraphProgram on the same input", "
 
     REQUIRE(lexy.stages.size() == handWritten.stages.size());
     REQUIRE(lexy.outputs.size() == handWritten.outputs.size());
+}
+
+// ---------------------------------------------------------------------------
+// DslFilterGraph: running graphs described in the text DSL
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::vector<std::string>& runLog()
+{
+    static std::vector<std::string> log;
+    return log;
+}
+
+// Appends "<label>:<value>" to runLog() and passes the value on unchanged.
+class RecordFilter : public MessageFilter<int>
+{
+public:
+    explicit RecordFilter(std::string label)
+        : mLabel(std::move(label))
+    {
+    }
+
+    std::optional<int> filter(int&& value) override
+    {
+        runLog().push_back(std::format("{}:{}", mLabel, value));
+        return value;
+    }
+
+private:
+    std::string mLabel;
+};
+
+static FilterRegistrar<DoubleFilter>   registerRunDouble("RunDouble");
+static FilterRegistrar<ToStringFilter> registerRunToString("RunToString");
+static FilterRegistrar<DropOddFilter>  registerRunDropOdd("RunDropOdd");
+static FilterRegistrar<VoidSinkFilter> registerRunVoidSink("RunVoidSink");
+
+static FilterRegistrar<RecordFilter> registerRunRecord("RunRecord", [](const nlohmann::json& config) {
+    return std::make_shared<RecordFilter>(config.value("label", std::string{}));
+});
+
+static FilterRegistrar<DoubleFilter> registerRunNeedsK("RunNeedsK", [](const nlohmann::json& config) {
+    (void)config.at("k").get<int>();
+    return std::make_shared<DoubleFilter>();
+});
+
+// Describes its fan-in slots, e.g. "8+4 (0 holes)".
+static const bool sRegisterRunDescribe = [] {
+    registerMergeFilter<std::string>("RunDescribe", [](MergeInputs&& inputs) -> std::optional<std::string> {
+        std::string joined;
+        std::size_t holes = 0;
+        for (const auto& input : inputs)
+        {
+            if (!input.has_value())
+            {
+                ++holes;
+                continue;
+            }
+            if (!joined.empty())
+            {
+                joined += '+';
+            }
+            joined += std::to_string(std::any_cast<int>(input));
+        }
+        return std::format("{} ({} hole{})", joined, holes, holes == 1 ? "" : "s");
+    });
+    return true;
+}();
+
+// A DSL graph is itself a MessageFilter, so it can be registered as a stage.
+static FilterRegistrar<DslFilterGraph<int, int>> registerRunQuadruple("RunQuadruple", [](const nlohmann::json&) {
+    return std::make_shared<DslFilterGraph<int, int>>("in -> RunDouble -> twice -> RunDouble -> out");
+});
+
+template <typename InputType, typename OutputType>
+std::vector<dsl::TextDiagnostic> buildErrors(std::string_view text)
+{
+    try
+    {
+        DslFilterGraph<InputType, OutputType> graph(text);
+    }
+    catch (const GraphError& error)
+    {
+        return error.diagnostics();
+    }
+    return {};
+}
+
+bool mentions(const std::vector<dsl::TextDiagnostic>& diagnostics, std::string_view text)
+{
+    return std::any_of(diagnostics.begin(), diagnostics.end(), [&](const dsl::TextDiagnostic& d) {
+        return d.message.find(text) != std::string::npos;
+    });
+}
+
+} // namespace
+
+TEST_CASE("DslFilterGraph runs a chain and converts types", "[DslFilterGraph]")
+{
+    DslFilterGraph<int, std::string> graph("in -> RunDouble -> doubled -> RunToString -> out");
+    REQUIRE(graph.filter(21).value() == "42");
+}
+
+TEST_CASE("DslFilterGraph propagates a drop downstream", "[DslFilterGraph]")
+{
+    DslFilterGraph<int, std::string> graph("in -> RunDropOdd -> even -> RunToString -> out");
+    REQUIRE(graph.filter(4).value() == "4");
+    REQUIRE_FALSE(graph.filter(3).has_value());
+}
+
+TEST_CASE("DslFilterGraph gives every reader of an edge its own copy, in source order", "[DslFilterGraph]")
+{
+    runLog().clear();
+    DslFilterGraph<int, int> graph(R"(
+        in -> RunRecord(label=tap) -> end
+        in -> RunDouble -> doubled -> RunRecord(label=main) -> out
+    )");
+
+    REQUIRE(graph.filter(5).value() == 10);
+    REQUIRE(runLog() == std::vector<std::string>{"tap:5", "main:10"});
+}
+
+TEST_CASE("DslFilterGraph runs a stage only after its inputs are produced", "[DslFilterGraph]")
+{
+    runLog().clear();
+    DslFilterGraph<int, int> graph(R"(
+        doubled -> RunRecord(label=late) -> out
+        in -> RunDouble -> doubled
+    )");
+
+    REQUIRE(graph.filter(2).value() == 4);
+    REQUIRE(runLog() == std::vector<std::string>{"late:4"});
+}
+
+TEST_CASE("DslFilterGraph merges fan-in edges and leaves holes for dropped paths", "[DslFilterGraph]")
+{
+    DslFilterGraph<int, std::string> graph(R"(
+        in -> RunDouble -> doubled
+        in -> RunDropOdd -> even
+        (doubled, even) -> RunDescribe -> out
+    )");
+
+    REQUIRE(graph.filter(4).value() == "8+4 (0 holes)");
+    REQUIRE(graph.filter(3).value() == "6 (1 hole)");
+}
+
+TEST_CASE("DslFilterGraph skips a merge when every input was dropped", "[DslFilterGraph]")
+{
+    DslFilterGraph<int, std::string> graph(R"(
+        in -> RunDropOdd -> a
+        in -> RunDropOdd -> b
+        (a, b) -> RunDescribe -> out
+    )");
+
+    REQUIRE_FALSE(graph.filter(3).has_value());
+}
+
+TEST_CASE("DslFilterGraph returns several keyed outputs as GraphOutputs", "[DslFilterGraph]")
+{
+    DslFilterGraph<int> graph(R"(
+        in -> RunDouble   -> out.doubled
+        in -> RunToString -> out.text
+        in -> RunDropOdd  -> out.even
+    )");
+
+    auto outputs = graph.filter(3);
+    REQUIRE(outputs.has_value());
+    REQUIRE(outputs->size() == 3);
+    REQUIRE(outputs->get<int>("doubled").value() == 6);
+    REQUIRE(outputs->get<std::string>(1).value() == "3");
+    REQUIRE_FALSE(outputs->has("even"));
+    REQUIRE_THROWS_AS(outputs->get<int>("missing"), std::out_of_range);
+    REQUIRE_THROWS_AS(outputs->get<std::string>("doubled"), std::bad_any_cast);
+
+    REQUIRE(outputs->take<std::string>("text").value() == "3");
+    REQUIRE_FALSE(outputs->has("text"));
+
+    DslFilterGraph<int> allDropped("in -> RunDropOdd -> out.a\nin -> RunDropOdd -> out.b\n");
+    REQUIRE_FALSE(allDropped.filter(3).has_value());
+}
+
+TEST_CASE("DslFilterGraph with a Void output runs a sink-only graph", "[DslFilterGraph]")
+{
+    runLog().clear();
+    DslFilterGraph<int, Void> graph("in -> RunRecord(label=sink) -> end\nin -> RunVoidSink -> end\n");
+
+    REQUIRE(graph.filter(7).has_value());
+    REQUIRE(runLog() == std::vector<std::string>{"sink:7"});
+}
+
+TEST_CASE("DslFilterGraph nests a registered DSL graph as a stage", "[DslFilterGraph]")
+{
+    DslFilterGraph<int, int> graph("in -> RunQuadruple -> out");
+    REQUIRE(graph.filter(3).value() == 12);
+
+    JsonFilterGraph<int, int> jsonGraph(nlohmann::json::parse(R"([ { "type": "RunQuadruple" } ])"));
+    REQUIRE(jsonGraph.filter(3).value() == 12);
+}
+
+TEST_CASE("DslFilterGraph runs a program parsed by the lexy front-end", "[DslFilterGraph]")
+{
+    DslFilterGraph<int, std::string> graph(
+        dsl::parseGraphProgramLexy("in -> RunDouble -> doubled -> RunToString -> out\n"));
+    REQUIRE(graph.filter(21).value() == "42");
+}
+
+TEST_CASE("DslFilterGraph reports every build problem at once, located and sorted", "[DslFilterGraph]")
+{
+    const auto diagnostics = buildErrors<int, int>("in -> RunToString -> text -> RunDouble -> out\n"
+                                                   "in -> RunNeedsK -> end\n"
+                                                   "in -> RunDescribe -> end\n");
+
+    REQUIRE(diagnostics.size() == 3);
+    REQUIRE(diagnostics[0].loc.line == 1);
+    REQUIRE(diagnostics[0].loc.column == 30);
+    REQUIRE(diagnostics[0].message.find("stage 'RunDouble' expects input type") != std::string::npos);
+    REQUIRE(diagnostics[0].message.find("edge 'text' carries") != std::string::npos);
+    REQUIRE(diagnostics[1].loc.line == 2);
+    REQUIRE(diagnostics[1].message.find("could not construct 'RunNeedsK'") != std::string::npos);
+    REQUIRE(diagnostics[2].loc.line == 3);
+    REQUIRE(diagnostics[2].message.find("'RunDescribe' is a merge stage") != std::string::npos);
+
+    try
+    {
+        DslFilterGraph<int, int> graph("in -> RunNeedsK -> out");
+        FAIL("expected a GraphError");
+    }
+    catch (const GraphError& error)
+    {
+        REQUIRE(std::string(error.what()).find("1:7: could not construct 'RunNeedsK'") != std::string::npos);
+    }
+}
+
+TEST_CASE("DslFilterGraph checks fan-in, Void and the graph input type", "[DslFilterGraph]")
+{
+    REQUIRE(mentions(buildErrors<int, int>("in -> RunDouble -> a\nin -> RunDouble -> b\n(a, b) -> RunDouble -> out"),
+                     "cannot follow a fan-in group"));
+    REQUIRE(mentions(buildErrors<int, GraphOutputs>("in -> RunVoidSink -> out"), "must route to 'end'"));
+    REQUIRE(mentions(buildErrors<std::string, int>("in -> RunDouble -> out"), "but the graph input 'in' carries"));
+}
+
+TEST_CASE("DslFilterGraph checks the output boundary against its OutputType", "[DslFilterGraph]")
+{
+    REQUIRE(mentions(buildErrors<int, int>("in -> RunDouble -> out.a\nin -> RunDouble -> out.b"),
+                     "needs exactly one '-> out'"));
+    REQUIRE(mentions(buildErrors<int, int>("in -> RunDouble -> end"), "needs one '-> out', but the graph has none"));
+    REQUIRE(mentions(buildErrors<int, int>("in -> RunToString -> out"), "but 'out' receives"));
+    REQUIRE(mentions(buildErrors<int, GraphOutputs>("in -> RunDouble -> end"), "GraphOutputs needs at least one"));
+    REQUIRE(mentions(buildErrors<int, Void>("in -> RunDouble -> out"), "route it to 'end' instead"));
+    REQUIRE(buildErrors<int, int>("in -> RunDouble -> out").empty());
+}
+
+TEST_CASE("validateDslGraph returns diagnostics without throwing", "[DslFilterGraph]")
+{
+    REQUIRE(validateDslGraph<int, std::string>("in -> RunDouble -> d -> RunToString -> out").empty());
+
+    const auto diagnostics = validateDslGraph<int, int>("in -> RunDoubel -> out\n\nin -> RunNeedsK -> end\n");
+    REQUIRE(diagnostics.size() == 2);
+    REQUIRE(dsl::formatDiagnostic(diagnostics[0]).starts_with("1:7: unknown stage type 'RunDoubel'"));
+    REQUIRE(diagnostics[0].message.find("did you mean 'RunDouble'?") != std::string::npos);
+    REQUIRE(diagnostics[1].loc.line == 3);
+}
+
+TEST_CASE("toMermaid generates node ids and labels outputs, config and dead ends", "[GraphDsl]")
+{
+    auto program = dsl::parseGraphProgram("in -> RunDouble -> out.twice\nin -> RunRecord(label=tap) -> end\n");
+    REQUIRE(program.ok());
+
+    const std::string mermaid = dsl::toMermaid(program);
+    REQUIRE(mermaid.starts_with("flowchart LR\n"));
+    REQUIRE(mermaid.find("e0([\"in\"])") != std::string::npos);
+    REQUIRE(mermaid.find("([\"out.twice\"])") != std::string::npos);
+    REQUIRE(mermaid.find("s1[\"RunRecord<br/>label=tap\"]") != std::string::npos);
+    REQUIRE(mermaid.find("d0[[\"end\"]]") != std::string::npos);
+    REQUIRE(mermaid.find("s1 --> d0") != std::string::npos);
+    REQUIRE(mermaid.find('$') == std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// Parser diagnostics: the hand-written and lexy parsers must agree exactly
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Everything a parse produces, as text, so two parses can be compared at once.
+std::string describeProgram(const dsl::GraphProgram& program)
+{
+    std::string text;
+    for (const auto& stage : program.stages)
+    {
+        text += std::format("stage {} @{}:{} config={} inputs=", stage.type, stage.loc.line, stage.loc.column,
+                            stage.config.dump());
+        for (const auto& input : stage.inputs)
+        {
+            text += input + ',';
+        }
+        text += std::format(" output={} fanIn={}\n", stage.output.value_or("<end>"), stage.fanIn);
+    }
+    for (const auto& output : program.outputs)
+    {
+        text += std::format("output {} key={} index={} @{}:{}\n", output.edge, output.key.value_or("<none>"),
+                            output.index, output.loc.line, output.loc.column);
+    }
+    text += std::format("deadEnds={}\n", program.deadEnds.size());
+    text += dsl::formatDiagnostics(program.diagnostics);
+    return text;
+}
+
+// Parses `source` with the lexy parser and the deprecated hand-written parser,
+// requires identical results, and returns the diagnostics.
+std::vector<dsl::TextDiagnostic> parseWithBoth(std::string_view source)
+{
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    const auto handWritten = dsl::parseGraphProgramHandwritten(source);
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+    const auto lexy = dsl::parseGraphProgram(source);
+    REQUIRE(describeProgram(lexy) == describeProgram(handWritten));
+    return lexy.diagnostics;
+}
+
+} // namespace
+
+TEST_CASE("Both parsers report the same located syntax errors", "[GraphDslErrors]")
+{
+    const std::vector<std::pair<std::string, std::string>> cases = {
+        {"in -> RunDouble RunDouble -> out", "1:17: expected '->' but found 'RunDouble'"},
+        {"in -> RunDouble ->", "1:19: expected an edge, stage, or group but found end of line"},
+        {"in -> RunDouble -> # comment", "1:20: expected an edge, stage, or group but found end of line"},
+        {"-> RunDouble -> out", "1:1: expected an edge, stage, or group but found '->'"},
+        {R"(in -> RunRecord(label="tap) -> out)", "1:23: unterminated string literal"},
+        {"in -> RunRecord(label=tap -> out", "1:27: expected an argument name but found '->'"},
+        {"in -> RunRecord(label=tap", "1:16: unterminated argument list; missing ')'"},
+        {"in -> RunRecord(3=tap) -> out", "1:17: expected an argument name but found '3'"},
+        {"in -> RunRecord(label tap) -> out", "1:23: expected '=' after argument 'label' but found 'tap'"},
+        {"in -> RunRecord(label=) -> out", "1:23: expected an argument value but found ')'"},
+        {"in -> RunRecord(label=1.2.3) -> out", "1:23: malformed number '1.2.3'"},
+        {"in -> RunRecord(n=99999999999999999999) -> out", "1:19: number '99999999999999999999' is out of range"},
+        {"(a, b -> RunDouble -> out", "1:7: expected an edge name in group but found '->'"},
+        {"(a, b", "1:1: unterminated fan-in group; missing ')'"},
+        {"() -> RunDouble -> out", "1:1: a fan-in group needs at least one edge"},
+        {"in -> RunDouble -> out.3", "1:24: expected a key name after '.' but found '3'"},
+        {"in -> Run@Double -> out", "1:10: unexpected character '@'"},
+        {"in -> RunDouble -> -", "1:20: unexpected character '-'"},
+        {"in -> RunDouble -> \xC3\xA9", "1:20: unexpected byte 0xC3"},
+        {"in -> RunDouble RunDouble -> out\r\n", "1:17: expected '->' but found 'RunDouble'"},
+    };
+
+    for (const auto& [source, expected] : cases)
+    {
+        INFO("source: " << source);
+        REQUIRE(dsl::formatDiagnostics(parseWithBoth(source)) == expected);
+    }
+}
+
+TEST_CASE("A syntax error ends only its own statement", "[GraphDslErrors]")
+{
+    const auto diagnostics = parseWithBoth("in -> RunDouble RunDouble -> x\n"
+                                           "in -> RunDouble -> y -> RunRecord(label=\"tap) -> out\n"
+                                           "in -> RunDouble -> out\n");
+
+    REQUIRE(dsl::formatDiagnostics(diagnostics)
+            == "1:17: expected '->' but found 'RunDouble'\n2:41: unterminated string literal");
+}
+
+TEST_CASE("Both parsers agree on strings, numbers and comments", "[GraphDslErrors]")
+{
+    const char* source = R"dsl(# a comment line
+in -> RunRecord(label="#1 \"quoted\" \\ done", ratio=0.5, n=-3, on=false, word=tap) -> recorded   # trailing
+recorded -> RunDouble -> out.twice
+)dsl";
+
+    REQUIRE(parseWithBoth(source).empty());
+
+    const auto program = dsl::parseGraphProgramLexy(source);
+    REQUIRE(program.stages.size() == 2);
+    const auto& config = program.stages[0].config;
+    REQUIRE(config.at("label").get<std::string>() == R"(#1 "quoted" \ done)");
+    REQUIRE(config.at("ratio").get<double>() == 0.5);
+    REQUIRE(config.at("n").get<int>() == -3);
+    REQUIRE(config.at("on").get<bool>() == false);
+    REQUIRE(config.at("word").get<std::string>() == "tap");
+    REQUIRE(program.stages[0].loc.line == 2);
+    REQUIRE(program.stages[0].loc.column == 7);
+    REQUIRE(program.stages[1].loc.column == 13);
 }

@@ -2,13 +2,15 @@
 // demonstrates the core building blocks of filterGraph:
 //  - MessageFilter: the base stage interface
 //  - FilterGraph: compile-time chaining of stages
-//  - FanoutFilter + FilterRegistry + JsonFilterGraph: a runtime, JSON
-//    configured pipeline with a parallel branch ("tap")
-//  - JoinFilter: scatter-gather, the mirror of Fanout (N paths -> 1 output)
+//  - FilterRegistry + DslFilterGraph: runtime graphs described in the text DSL,
+//    with fan-out (a "tap"), fan-in (a merge) and several named outputs
+//  - validateDslGraph: every problem in a broken graph, located by line:column
+//  - JsonFilterGraph: the JSON format, which remains supported
+#include <filterGraph/core/filterGraph/DslFilterGraph.hpp>
 #include <filterGraph/core/filterGraph/FanoutFilter.hpp>
 #include <filterGraph/core/filterGraph/FilterGraph.hpp>
-#include <filterGraph/core/filterGraph/JoinFilter.hpp>
 #include <filterGraph/core/filterGraph/JsonFilterGraph.hpp>
+#include <filterGraph/core/filterGraph/MergeFilter.hpp>
 #include <filterGraph/core/filterGraph/MessageFilter.hpp>
 
 #include <nlohmann/json.hpp>
@@ -16,20 +18,24 @@
 #include <algorithm>
 #include <any>
 #include <cctype>
+#include <cstddef>
 #include <format>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
-#include <vector>
 
-using filterGraph::FanoutFilter;
+using filterGraph::DslFilterGraph;
 using filterGraph::FilterGraph;
 using filterGraph::FilterRegistrar;
 using filterGraph::JsonFilterGraph;
+using filterGraph::MergeInputs;
 using filterGraph::MessageFilter;
 using filterGraph::registerFanoutFilter;
-using filterGraph::registerJoinFilter;
+using filterGraph::registerMergeFilter;
+using filterGraph::validateDslGraph;
+
+namespace dsl = filterGraph::dsl;
 
 // --- Stages -----------------------------------------------------------
 
@@ -53,9 +59,19 @@ public:
     }
 };
 
+// Changes the message type: string in, length out.
+class LengthFilter : public MessageFilter<std::string, std::size_t>
+{
+public:
+    std::optional<std::size_t> filter(std::string&& text) override
+    {
+        return text.size();
+    }
+};
+
 // A configurable stage: drops (short-circuits) any message shorter than a
-// configurable minimum length, demonstrating both JSON-driven configuration
-// and early chain termination via std::nullopt.
+// configurable minimum length, demonstrating both configuration and early
+// termination via std::nullopt.
 class MinLengthFilter : public MessageFilter<std::string>
 {
 public:
@@ -95,11 +111,13 @@ private:
     std::string mPrefix;
 };
 
-// --- Registration for the JSON-driven part of the example --------------
+// --- Registration: the names the DSL (and JSON) refer to ---------------
 
 static FilterRegistrar<UppercaseFilter> registerUppercase("Uppercase");
-static FilterRegistrar<ReverseFilter>    registerReverse("Reverse");
+static FilterRegistrar<ReverseFilter>   registerReverse("Reverse");
+static FilterRegistrar<LengthFilter>    registerLength("Length");
 
+// Stage arguments, e.g. `MinLength(minLength=3)`, arrive as a JSON object.
 static FilterRegistrar<MinLengthFilter> registerMinLength(
     "MinLength",
     [](const nlohmann::json& config) {
@@ -112,24 +130,18 @@ static FilterRegistrar<PrintFilter> registerPrint(
         return std::make_shared<PrintFilter>(config.value("prefix", std::string{}));
     });
 
-static const bool sRegisterFanout = [] {
-    registerFanoutFilter<std::string>("Fanout");
-    return true;
-}();
-
-// The Join combiner lives in C++ (it cannot be expressed in JSON): it gathers
-// one slot per path (empty slots are "holes" left by paths that dropped their
-// message via std::nullopt), concatenates the present outputs with " | ", and
-// reports how many holes it saw.
-static const bool sRegisterJoin = [] {
-    registerJoinFilter<std::string, std::string>(
-        "Join",
-        [](std::vector<std::any>&& outputs) -> std::optional<std::string> {
+// A merge stage for fan-in `(a, b, c) -> Concat`. The combiner receives one
+// slot per edge; empty slots are "holes" left by paths that dropped the
+// message. It concatenates the present values with " | " and counts the holes.
+static const bool sRegisterConcat = [] {
+    registerMergeFilter<std::string>(
+        "Concat",
+        [](MergeInputs&& inputs) -> std::optional<std::string> {
             std::string joined;
             std::size_t holes = 0;
-            for (auto& out : outputs)
+            for (auto& input : inputs)
             {
-                if (!out.has_value())
+                if (!input.has_value())
                 {
                     ++holes;
                     continue;
@@ -138,10 +150,16 @@ static const bool sRegisterJoin = [] {
                 {
                     joined += " | ";
                 }
-                joined += std::any_cast<std::string>(out);
+                joined += std::any_cast<std::string>(input);
             }
             return joined + std::format(" ({} hole{})", holes, holes == 1 ? "" : "s");
         });
+    return true;
+}();
+
+// Only needed by the JSON example: in the DSL, fan-out is built in.
+static const bool sRegisterFanout = [] {
+    registerFanoutFilter<std::string>("Fanout");
     return true;
 }();
 
@@ -158,40 +176,75 @@ int main()
         pipeline.filter(std::string{"Hello, filterGraph!"});
     }
 
-    // 2) Runtime, JSON-configured pipeline with a parallel branch ("tap"):
-    //    the original text is duplicated to a side branch (uppercase+print)
-    //    while the main path reverses it, drops it if too short, and prints.
+    // 2) Runtime graph in the text DSL, with a tap. Both statements read `in`,
+    //    so each gets its own copy: the first uppercases and prints its copy
+    //    (then discards it at `end`); the second reverses the message, drops it
+    //    if it is too short, and prints it as the graph's output.
     {
-        auto pipelineConfig = nlohmann::json::parse(R"([
+        DslFilterGraph<std::string, int> pipeline(R"dsl(
+            in -> Uppercase -> shouted -> Print(prefix="[tap] ") -> end
+            in -> Reverse -> reversed -> MinLength(minLength=3) -> long -> Print(prefix="[main] ") -> out
+        )dsl");
+
+        pipeline.filter(std::string{"Hello, filterGraph!"});
+        pipeline.filter(std::string{"ab"}); // tapped, then dropped by MinLength on the main path
+    }
+
+    // 3) Fan-in: three paths read the same input and a merge combines them.
+    //    MinLength=100 drops its copy, which leaves a hole in the merge.
+    {
+        DslFilterGraph<std::string, int> pipeline(R"dsl(
+            in -> Uppercase -> upper
+            in -> Reverse -> reversed
+            in -> MinLength(minLength=100) -> long
+            (upper, reversed, long) -> Concat -> joined -> Print(prefix="[merge] ") -> out
+        )dsl");
+
+        pipeline.filter(std::string{"Hello, filterGraph!"});
+    }
+
+    // 4) Several named outputs of different types, returned as GraphOutputs.
+    {
+        DslFilterGraph<std::string> analysis(R"dsl(
+            in -> Uppercase -> out.upper
+            in -> Length -> out.length
+            in -> MinLength(minLength=100) -> out.long
+        )dsl");
+
+        auto outputs = analysis.filter(std::string{"Hello, filterGraph!"});
+        std::cout << std::format("[outputs] upper={} length={} long={}\n",
+                                 *outputs->get<std::string>("upper"),
+                                 *outputs->get<std::size_t>("length"),
+                                 outputs->has("long") ? "present" : "dropped");
+    }
+
+    // 5) Problems are reported before anything runs: all of them at once, each
+    //    located by line:column. Constructing a DslFilterGraph from this text
+    //    would throw a GraphError carrying the same diagnostics.
+    {
+        const auto diagnostics = validateDslGraph<std::string, int>(
+            "in -> Uppercas -> shouted -> Print -> out\n"
+            "in -> MinLength -> long -> Print -> end\n");
+
+        for (const auto& diagnostic : diagnostics)
+        {
+            std::cout << "[check] " << dsl::formatDiagnostic(diagnostic) << '\n';
+        }
+    }
+
+    // 6) The JSON format is still supported and uses the same registry. This is
+    //    the tap pipeline from (2), written with a Fanout stage.
+    {
+        auto pipelineConfig = nlohmann::json::parse(R"json([
             { "type": "Fanout", "config": { "branches": [
-                [ { "type": "Uppercase" }, { "type": "Print", "config": { "prefix": "[branch] " } } ]
+                [ { "type": "Uppercase" }, { "type": "Print", "config": { "prefix": "[json tap] " } } ]
             ] } },
             { "type": "Reverse" },
             { "type": "MinLength", "config": { "minLength": 3 } },
-            { "type": "Print", "config": { "prefix": "[main] " } }
-        ])");
+            { "type": "Print", "config": { "prefix": "[json main] " } }
+        ])json");
 
         JsonFilterGraph<std::string, int> pipeline(pipelineConfig);
-        pipeline.filter(std::string{"Hello, filterGraph!"});
-        pipeline.filter(std::string{"ab"}); // dropped by MinLength on the main path
-    }
-
-    // 3) Join (scatter-gather): the mirror of Fanout. The SAME input is
-    //    scattered (copied) through N independent paths; a C++ combiner then
-    //    gathers their outputs into one. Here two paths transform the text
-    //    (uppercase, reverse) and a third drops it (MinLength=100), leaving a
-    //    hole the combiner can see and report.
-    {
-        auto joinConfig = nlohmann::json::parse(R"([
-            { "type": "Join", "config": { "paths": [
-                [ { "type": "Uppercase" } ],
-                [ { "type": "Reverse" } ],
-                [ { "type": "MinLength", "config": { "minLength": 100 } } ]
-            ] } },
-            { "type": "Print", "config": { "prefix": "[join] " } }
-        ])");
-
-        JsonFilterGraph<std::string, int> pipeline(joinConfig);
         pipeline.filter(std::string{"Hello, filterGraph!"});
     }
 

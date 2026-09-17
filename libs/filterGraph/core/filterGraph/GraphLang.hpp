@@ -3,6 +3,11 @@
 #include <filterGraph/core/filterGraph/FilterRegistry.hpp>
 #include <filterGraph/core/filterGraph/GraphValidator.hpp>
 
+#include <lexy/action/scan.hpp>
+#include <lexy/dsl.hpp>
+#include <lexy/error.hpp>
+#include <lexy/input/string_input.hpp>
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -10,32 +15,41 @@
 #include <cstdint>
 #include <format>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
-// Text DSL (Model B) for describing a filter graph as a named-edge DAG.
+// Text DSL for describing a filter graph as a named-edge DAG. This is the
+// preferred way to describe a runtime graph; DslFilterGraph (DslFilterGraph.hpp)
+// builds and runs one.
 //
 // A program is a set of newline-separated statements; each statement is an
 // alternating chain of edges and stages joined by "->":
 //
 //   in            -> Parse            -> msg
 //   msg           -> Format           -> out.text
-//   msg           -> Summary          -> out.stats
-//   (a, b)        -> Merge            -> c
+//   msg           -> Summary          -> sum
+//   (msg, sum)    -> Merge            -> out.stats
 //   msg           -> Store            -> end
 //
 // - even positions are edges (identifiers) or the reserved boundary nodes
-//   `in` (graph input), `out` / `out.<key>` (results), `end` (dead-end/Void);
+//   `in` (graph input), `out` / `out.<key>` (results), `end` (dead-end: the
+//   value is discarded);
 // - odd positions are stage applications: a REGISTERED filter/merge name,
 //   optionally with config args `Name(k=v, k2="s", k3=true)`;
 // - fan-out = reuse an edge name as a source in several statements;
-// - fan-in = a source group `(a, b) -> Merge -> c`.
+// - fan-in = a source group `(a, b) -> Merge -> c`, where Merge is a merge
+//   stage (see registerMergeFilter in MergeFilter.hpp);
+// - `#` starts a comment that runs to the end of the line.
 //
-// This front-end only parses/validates/visualizes; executing a Model-B graph
-// needs runtime edge-routing that is intentionally out of scope here.
+// This header parses (with a lexy-based parser) and structurally validates a
+// program into a node/edge IR (GraphProgram) and renders it with toMermaid;
+// DslFilterGraph instantiates, type-checks and runs it. The original
+// hand-written parser is deprecated (GraphLangHandwritten.hpp).
 namespace filterGraph::dsl {
 
 struct SourceLoc
@@ -57,7 +71,8 @@ struct StageNode
     std::string                type;    // registered filter/merge name
     nlohmann::json             config;  // parsed config args
     std::vector<std::string>   inputs;  // source edge names ("in" allowed)
-    std::optional<std::string> output;  // produced edge name; nullopt => routed to out/end
+    std::optional<std::string> output;  // produced edge name ("$outN" for `out`); nullopt => routed to end
+    bool                       fanIn = false; // inputs came from a group `(a, b) -> Stage`
     SourceLoc                  loc;
 };
 
@@ -83,36 +98,47 @@ struct GraphProgram
     }
 };
 
+// Formats a diagnostic as "line:column: message".
+inline std::string formatDiagnostic(const TextDiagnostic& diagnostic)
+{
+    return std::format("{}:{}: {}", diagnostic.loc.line, diagnostic.loc.column, diagnostic.message);
+}
+
+// Formats diagnostics one per line.
+inline std::string formatDiagnostics(const std::vector<TextDiagnostic>& diagnostics)
+{
+    std::string text;
+    for (const auto& diagnostic : diagnostics)
+    {
+        if (!text.empty())
+        {
+            text += '\n';
+        }
+        text += formatDiagnostic(diagnostic);
+    }
+    return text;
+}
+
 namespace detail {
+
+inline void sortDiagnostics(std::vector<TextDiagnostic>& diagnostics)
+{
+    std::stable_sort(diagnostics.begin(), diagnostics.end(), [](const TextDiagnostic& a, const TextDiagnostic& b) {
+        return a.loc.line != b.loc.line ? a.loc.line < b.loc.line : a.loc.column < b.loc.column;
+    });
+}
 
 inline bool isReserved(std::string_view name)
 {
     return name == "in" || name == "out" || name == "end";
 }
 
-// ------------------------------- tokenizer -------------------------------
-
-enum class TokenKind
-{
-    Identifier,
-    Number,
-    String,
-    Arrow,     // ->
-    LParen,    // (
-    RParen,    // )
-    Comma,     // ,
-    Equals,    // =
-    Dot,       // .
-    Newline,
-    EndOfInput
-};
-
-struct Token
-{
-    TokenKind   kind;
-    std::string text;
-    SourceLoc   loc;
-};
+// ------------------------- shared lexical helpers ------------------------
+//
+// The parser below and the deprecated hand-written parser
+// (GraphLangHandwritten.hpp) classify input and produce literal values and
+// error descriptions through these helpers, so they report identical
+// diagnostics.
 
 inline bool isIdentStart(char c)
 {
@@ -129,193 +155,141 @@ inline bool isDigit(char c)
     return c >= '0' && c <= '9';
 }
 
-class Lexer
+struct StringLiteral
 {
-public:
-    explicit Lexer(std::string_view source)
-        : mSource(source)
-    {
-    }
-
-    std::vector<Token> tokenize()
-    {
-        std::vector<Token> tokens;
-        while (mPos < mSource.size())
-        {
-            const char c = mSource[mPos];
-
-            if (c == '\n')
-            {
-                tokens.push_back(make(TokenKind::Newline, "\n"));
-                advance();
-                continue;
-            }
-            if (c == '\r' || c == ' ' || c == '\t')
-            {
-                advance();
-                continue;
-            }
-            if (c == '#')
-            {
-                while (mPos < mSource.size() && mSource[mPos] != '\n')
-                {
-                    advance();
-                }
-                continue;
-            }
-            if (c == '-' && mPos + 1 < mSource.size() && mSource[mPos + 1] == '>')
-            {
-                tokens.push_back(make(TokenKind::Arrow, "->"));
-                advance();
-                advance();
-                continue;
-            }
-            if (c == '(')
-            {
-                tokens.push_back(make(TokenKind::LParen, "("));
-                advance();
-                continue;
-            }
-            if (c == ')')
-            {
-                tokens.push_back(make(TokenKind::RParen, ")"));
-                advance();
-                continue;
-            }
-            if (c == ',')
-            {
-                tokens.push_back(make(TokenKind::Comma, ","));
-                advance();
-                continue;
-            }
-            if (c == '=')
-            {
-                tokens.push_back(make(TokenKind::Equals, "="));
-                advance();
-                continue;
-            }
-            if (c == '.')
-            {
-                tokens.push_back(make(TokenKind::Dot, "."));
-                advance();
-                continue;
-            }
-            if (c == '"')
-            {
-                tokens.push_back(lexString());
-                continue;
-            }
-            if (isDigit(c) || (c == '-' && mPos + 1 < mSource.size() && isDigit(mSource[mPos + 1])))
-            {
-                tokens.push_back(lexNumber());
-                continue;
-            }
-            if (isIdentStart(c))
-            {
-                tokens.push_back(lexIdentifier());
-                continue;
-            }
-
-            // Unknown character: record and skip so lexing can continue.
-            mErrors.push_back({currentLoc(), std::format("unexpected character '{}'", c)});
-            advance();
-        }
-        tokens.push_back(make(TokenKind::EndOfInput, ""));
-        return tokens;
-    }
-
-    const std::vector<TextDiagnostic>& errors() const
-    {
-        return mErrors;
-    }
-
-private:
-    Token make(TokenKind kind, std::string text) const
-    {
-        return Token{kind, std::move(text), currentLoc()};
-    }
-
-    SourceLoc currentLoc() const
-    {
-        return SourceLoc{mLine, mColumn};
-    }
-
-    void advance()
-    {
-        if (mSource[mPos] == '\n')
-        {
-            ++mLine;
-            mColumn = 1;
-        }
-        else
-        {
-            ++mColumn;
-        }
-        ++mPos;
-    }
-
-    Token lexString()
-    {
-        const SourceLoc start = currentLoc();
-        advance(); // opening quote
-        std::string value;
-        while (mPos < mSource.size() && mSource[mPos] != '"')
-        {
-            if (mSource[mPos] == '\\' && mPos + 1 < mSource.size())
-            {
-                advance();
-            }
-            value += mSource[mPos];
-            advance();
-        }
-        if (mPos < mSource.size())
-        {
-            advance(); // closing quote
-        }
-        else
-        {
-            mErrors.push_back({start, "unterminated string literal"});
-        }
-        return Token{TokenKind::String, std::move(value), start};
-    }
-
-    Token lexNumber()
-    {
-        const SourceLoc start = currentLoc();
-        std::string     value;
-        if (mSource[mPos] == '-')
-        {
-            value += '-';
-            advance();
-        }
-        while (mPos < mSource.size() && (isDigit(mSource[mPos]) || mSource[mPos] == '.'))
-        {
-            value += mSource[mPos];
-            advance();
-        }
-        return Token{TokenKind::Number, std::move(value), start};
-    }
-
-    Token lexIdentifier()
-    {
-        const SourceLoc start = currentLoc();
-        std::string     value;
-        while (mPos < mSource.size() && isIdentPart(mSource[mPos]))
-        {
-            value += mSource[mPos];
-            advance();
-        }
-        return Token{TokenKind::Identifier, std::move(value), start};
-    }
-
-    std::string_view            mSource;
-    std::size_t                 mPos    = 0;
-    std::size_t                 mLine   = 1;
-    std::size_t                 mColumn = 1;
-    std::vector<TextDiagnostic> mErrors;
+    std::string value;  // with escapes resolved
+    std::size_t length; // in the source, including both quotes
 };
 
-// -------------------------------- parser ---------------------------------
+// `rest` starts at an opening quote. A backslash takes the next character
+// literally. Returns std::nullopt if the line ends before the closing quote.
+inline std::optional<StringLiteral> scanStringLiteral(std::string_view rest)
+{
+    std::string value;
+    std::size_t i = 1;
+    while (i < rest.size() && rest[i] != '"' && rest[i] != '\n')
+    {
+        if (rest[i] == '\\' && i + 1 < rest.size() && rest[i + 1] != '\n')
+        {
+            ++i;
+        }
+        value += rest[i];
+        ++i;
+    }
+    if (i >= rest.size() || rest[i] != '"')
+    {
+        return std::nullopt;
+    }
+    return StringLiteral{std::move(value), i + 1};
+}
+
+// Length of the number token at the start of `rest` (an optional '-', a digit,
+// then digits and dots), or 0 if `rest` does not start with a number.
+inline std::size_t numberLength(std::string_view rest)
+{
+    std::size_t i = 0;
+    if (!rest.empty() && rest[0] == '-')
+    {
+        i = 1;
+    }
+    if (i >= rest.size() || !isDigit(rest[i]))
+    {
+        return 0;
+    }
+    while (i < rest.size() && (isDigit(rest[i]) || rest[i] == '.'))
+    {
+        ++i;
+    }
+    return i;
+}
+
+// Converts a number token to JSON: an integer, or a double if it has a
+// fractional part. On failure returns std::nullopt and sets `error`.
+inline std::optional<nlohmann::json> numberValue(std::string_view text, std::string& error)
+{
+    const std::string number(text);
+    const std::size_t dot = number.find('.');
+    if (dot != std::string::npos && (dot + 1 == number.size() || number.find('.', dot + 1) != std::string::npos))
+    {
+        error = std::format("malformed number '{}'", number);
+        return std::optional<nlohmann::json>{};
+    }
+    try
+    {
+        if (dot != std::string::npos)
+        {
+            return nlohmann::json(std::stod(number));
+        }
+        return nlohmann::json(static_cast<std::int64_t>(std::stoll(number)));
+    }
+    catch (const std::out_of_range&)
+    {
+        error = std::format("number '{}' is out of range", number);
+        return std::optional<nlohmann::json>{};
+    }
+}
+
+inline std::string unexpectedCharacter(char c)
+{
+    const auto code = static_cast<unsigned char>(c);
+    if (code >= 0x20 && code < 0x7F)
+    {
+        return std::format("unexpected character '{}'", c);
+    }
+    return std::format("unexpected byte 0x{:02X}", static_cast<unsigned>(code));
+}
+
+// Describes the input at the start of `rest` for an "expected ... but found
+// ..." message. If that input is not a valid token at all, `invalid` is set and
+// `text` is the complete error message instead.
+struct Found
+{
+    bool        invalid = false;
+    std::string text;
+};
+
+inline Found describeFound(std::string_view rest)
+{
+    rest = rest.substr(0, rest.find('\n'));
+    if (rest.empty() || rest.front() == '#')
+    {
+        return {false, "end of line"};
+    }
+    if (rest.starts_with("->"))
+    {
+        return {false, "'->'"};
+    }
+
+    const char c = rest.front();
+    if (c == '"')
+    {
+        if (scanStringLiteral(rest))
+        {
+            return {false, "a string literal"};
+        }
+        return {true, "unterminated string literal"};
+    }
+    if (const std::size_t length = numberLength(rest))
+    {
+        return {false, std::format("'{}'", rest.substr(0, length))};
+    }
+    if (isIdentStart(c))
+    {
+        std::size_t length = 1;
+        while (length < rest.size() && isIdentPart(rest[length]))
+        {
+            ++length;
+        }
+        return {false, std::format("'{}'", rest.substr(0, length))};
+    }
+    if (c == '(' || c == ')' || c == ',' || c == '=' || c == '.')
+    {
+        return {false, std::format("'{}'", c)};
+    }
+    return {true, unexpectedCharacter(c)};
+}
+
+// -------------------------------- terms ----------------------------------
 
 // A single term in a statement, already classified by the parser.
 struct Term
@@ -338,7 +312,7 @@ struct Term
 
 // Interprets a flat term list (edge, stage, edge, ...) into stage nodes, wiring
 // each stage's inputs from the previous edge/group and its output edge from the
-// next edge/boundary. Shared by every front-end (hand-written or lexy).
+// next edge/boundary. Shared by every parser.
 inline void buildStatement(std::vector<Term>&           terms,
                            GraphProgram&                program,
                            std::size_t&                 outputIndex,
@@ -392,6 +366,11 @@ inline void buildStatement(std::vector<Term>&           terms,
                 diags.push_back({terms[i].loc, "a fan-in group may only appear as the first term of a statement"});
                 return;
             }
+            if (terms[i].kind == Term::Kind::Group && terms[i].edges.empty())
+            {
+                diags.push_back({terms[i].loc, "a fan-in group needs at least one edge"});
+                return;
+            }
         }
     }
 
@@ -400,14 +379,16 @@ inline void buildStatement(std::vector<Term>&           terms,
     for (std::size_t i = 1; i < terms.size(); i += 2)
     {
         StageNode node;
-        node.type   = terms[i].name;
-        node.config = terms[i].config;
+        node.type = terms[i].name;
+        // A stage without `(...)` gets an empty object, as a JSON stage without "config" does.
+        node.config = terms[i].config.is_null() ? nlohmann::json::object() : terms[i].config;
         node.loc    = terms[i].loc;
 
         const Term& source = terms[i - 1];
         if (source.kind == Term::Kind::Group)
         {
             node.inputs = source.edges;
+            node.fanIn  = true;
         }
         else
         {
@@ -436,270 +417,6 @@ inline void buildStatement(std::vector<Term>&           terms,
         program.stages.push_back(std::move(node));
     }
 }
-
-class Parser
-{
-public:
-    Parser(std::vector<Token> tokens, std::vector<TextDiagnostic> lexErrors)
-        : mTokens(std::move(tokens))
-        , mDiagnostics(std::move(lexErrors))
-    {
-    }
-
-    GraphProgram parse()
-    {
-        GraphProgram program;
-        std::size_t  outputIndex = 0;
-
-        while (peek().kind != TokenKind::EndOfInput)
-        {
-            if (peek().kind == TokenKind::Newline)
-            {
-                next();
-                continue;
-            }
-
-            auto terms = parseStatement();
-            if (!terms.empty())
-            {
-                buildStatement(terms, program, outputIndex, mDiagnostics);
-            }
-        }
-
-        program.diagnostics = std::move(mDiagnostics);
-        return program;
-    }
-
-private:
-    const Token& peek() const
-    {
-        return mTokens[mPos];
-    }
-
-    const Token& next()
-    {
-        return mTokens[mPos < mTokens.size() - 1 ? mPos++ : mPos];
-    }
-
-    void error(const SourceLoc& loc, std::string message)
-    {
-        mDiagnostics.push_back({loc, std::move(message)});
-    }
-
-    // Parses a single line into a flat list of terms (until newline / EOF).
-    std::vector<Term> parseStatement()
-    {
-        std::vector<Term> terms;
-        bool              expectArrow = false;
-
-        while (peek().kind != TokenKind::Newline && peek().kind != TokenKind::EndOfInput)
-        {
-            if (expectArrow)
-            {
-                if (peek().kind != TokenKind::Arrow)
-                {
-                    error(peek().loc, std::format("expected '->' but found '{}'", peek().text));
-                    // Skip to end of line to recover.
-                    while (peek().kind != TokenKind::Newline && peek().kind != TokenKind::EndOfInput)
-                    {
-                        next();
-                    }
-                    break;
-                }
-                next(); // consume arrow
-                expectArrow = false;
-                continue;
-            }
-
-            if (auto term = parseTerm())
-            {
-                terms.push_back(std::move(*term));
-                expectArrow = true;
-            }
-            else
-            {
-                break;
-            }
-        }
-        return terms;
-    }
-
-    std::optional<Term> parseTerm()
-    {
-        const Token& token = peek();
-
-        if (token.kind == TokenKind::LParen)
-        {
-            return parseGroup();
-        }
-        if (token.kind == TokenKind::Identifier)
-        {
-            return parseNamedTerm();
-        }
-
-        error(token.loc, std::format("expected an edge, stage, or group but found '{}'", token.text));
-        next();
-        return std::nullopt;
-    }
-
-    Term parseGroup()
-    {
-        Term term;
-        term.kind = Term::Kind::Group;
-        term.loc  = peek().loc;
-        next(); // (
-
-        while (peek().kind != TokenKind::RParen && peek().kind != TokenKind::Newline
-               && peek().kind != TokenKind::EndOfInput)
-        {
-            if (peek().kind == TokenKind::Identifier)
-            {
-                term.edges.push_back(peek().text);
-                next();
-            }
-            else if (peek().kind == TokenKind::Comma)
-            {
-                next();
-            }
-            else
-            {
-                error(peek().loc, std::format("expected an edge name in group but found '{}'", peek().text));
-                next();
-            }
-        }
-        if (peek().kind == TokenKind::RParen)
-        {
-            next();
-        }
-        else
-        {
-            error(term.loc, "unterminated fan-in group; missing ')'");
-        }
-        return term;
-    }
-
-    Term parseNamedTerm()
-    {
-        Term term;
-        term.loc         = peek().loc;
-        term.name        = peek().text;
-        next();
-
-        // Optional `.key` (currently only meaningful for `out`).
-        if (peek().kind == TokenKind::Dot)
-        {
-            next();
-            if (peek().kind == TokenKind::Identifier)
-            {
-                term.key = peek().text;
-                next();
-            }
-            else
-            {
-                error(peek().loc, "expected a key name after '.'");
-            }
-        }
-
-        // A trailing `(...)` makes this a stage application with config args.
-        if (peek().kind == TokenKind::LParen)
-        {
-            term.kind   = Term::Kind::Stage;
-            term.config = parseConfigArgs();
-            return term;
-        }
-
-        if (isReserved(term.name))
-        {
-            term.kind = (term.name == "in") ? Term::Kind::Edge : Term::Kind::Boundary;
-        }
-        else
-        {
-            // Positional classification (edge vs stage) is resolved later; mark
-            // as Edge here and let buildStatement reinterpret odd positions.
-            term.kind = Term::Kind::Edge;
-        }
-        return term;
-    }
-
-    nlohmann::json parseConfigArgs()
-    {
-        nlohmann::json config = nlohmann::json::object();
-        next(); // (
-
-        while (peek().kind != TokenKind::RParen && peek().kind != TokenKind::Newline
-               && peek().kind != TokenKind::EndOfInput)
-        {
-            if (peek().kind == TokenKind::Comma)
-            {
-                next();
-                continue;
-            }
-            if (peek().kind != TokenKind::Identifier)
-            {
-                error(peek().loc, std::format("expected a config key but found '{}'", peek().text));
-                next();
-                continue;
-            }
-            const std::string key = peek().text;
-            next();
-            if (peek().kind != TokenKind::Equals)
-            {
-                error(peek().loc, std::format("expected '=' after config key '{}'", key));
-                continue;
-            }
-            next(); // =
-            config[key] = parseConfigValue();
-        }
-        if (peek().kind == TokenKind::RParen)
-        {
-            next();
-        }
-        else
-        {
-            error(peek().loc, "unterminated config argument list; missing ')'");
-        }
-        return config;
-    }
-
-    nlohmann::json parseConfigValue()
-    {
-        const Token& token = peek();
-        if (token.kind == TokenKind::String)
-        {
-            next();
-            return token.text;
-        }
-        if (token.kind == TokenKind::Number)
-        {
-            next();
-            if (token.text.find('.') != std::string::npos)
-            {
-                return std::stod(token.text);
-            }
-            return static_cast<std::int64_t>(std::stoll(token.text));
-        }
-        if (token.kind == TokenKind::Identifier)
-        {
-            next();
-            if (token.text == "true")
-            {
-                return true;
-            }
-            if (token.text == "false")
-            {
-                return false;
-            }
-            return token.text; // bareword treated as string
-        }
-        error(token.loc, std::format("expected a config value but found '{}'", token.text));
-        next();
-        return nullptr;
-    }
-
-    std::vector<Token>          mTokens;
-    std::size_t                 mPos = 0;
-    std::vector<TextDiagnostic> mDiagnostics;
-};
 
 // ------------------------------ validation -------------------------------
 
@@ -836,46 +553,469 @@ inline void validateProgram(GraphProgram& program)
     }
 }
 
-} // namespace detail
+// ------------------------------- parser ----------------------------------
+//
+// The DSL is newline-significant, so parseGraphProgram runs a lexy scanner over
+// each line. Syntax errors are raised through lexy's error callback, which
+// records them as located TextDiagnostics; a syntax error ends its statement,
+// so each line reports at most one.
 
-// Parses and structurally validates a Model-B graph program from text. All
-// problems (lexer, parser, and semantic) are collected into
-// GraphProgram::diagnostics, each located by line/column.
-inline GraphProgram parseGraphProgram(std::string_view text)
+namespace lexy_impl {
+
+namespace ld = lexy::dsl;
+
+// Identifier: [A-Za-z_][A-Za-z0-9_]*
+inline constexpr auto identToken =
+    ld::token(ld::ascii::alpha_underscore + ld::while_(ld::ascii::alpha_digit_underscore));
+
+// A run of spaces/tabs (and a stray CR) between tokens.
+inline constexpr auto blankToken = ld::token(ld::while_(ld::ascii::blank / ld::lit_c<'\r'>));
+
+// Ends a chunk of string contents: the closing quote or the start of an escape.
+inline constexpr auto stringStop = ld::literal_set(ld::lit_c<'"'>, ld::lit_c<'\\'>);
+
+// The tag of every syntax error raised by this parser. Its message is prepared
+// right before the error is raised (LineErrors::pendingMessage).
+struct syntax_error
 {
-    detail::Lexer lexer(text);
-    auto          tokens = lexer.tokenize();
+    static constexpr auto name = "syntax error";
+};
 
-    detail::Parser parser(std::move(tokens), lexer.errors());
-    GraphProgram   program = parser.parse();
-
-    detail::validateProgram(program);
-    return program;
-}
-
-// Renders a parsed program as a Mermaid flowchart so the DAG can be visualized.
-inline std::string toMermaid(const GraphProgram& program)
+// Records the errors lexy reports for one line as located diagnostics.
+struct LineErrors
 {
-    std::string out = "flowchart LR\n";
+    const char*                  lineBegin;
+    std::size_t                  lineNo;
+    std::vector<TextDiagnostic>* diagnostics;
+    std::string                  pendingMessage;
 
-    std::size_t nodeId = 0;
-    for (const auto& stage : program.stages)
+    void record(const char* position, std::string message)
     {
-        const std::string id = std::format("n{}", nodeId++);
-        for (const auto& input : stage.inputs)
+        const auto column = static_cast<std::size_t>(position - lineBegin) + 1;
+        diagnostics->push_back({SourceLoc{lineNo, column}, std::move(message)});
+    }
+};
+
+// The lexy error callback. Syntax errors carry their prepared message; lexy's
+// own error kinds are formatted generically, so no error is ever reported
+// without a location.
+struct ErrorCallback
+{
+    using return_type = void;
+
+    LineErrors* errors;
+
+    template <typename Input, typename Reader>
+    void operator()(const lexy::error_context<Input>&, const lexy::error<Reader, void>& error) const
+    {
+        std::string message = errors->pendingMessage.empty() ? std::string(error.message())
+                                                             : std::exchange(errors->pendingMessage, std::string{});
+        errors->record(error.position(), std::move(message));
+    }
+
+    template <typename Input, typename Reader>
+    void operator()(const lexy::error_context<Input>&, const lexy::error<Reader, lexy::expected_literal>& error) const
+    {
+        errors->record(error.position(),
+                       std::format("expected '{}'", std::string_view(error.string(), error.length())));
+    }
+
+    template <typename Input, typename Reader>
+    void operator()(const lexy::error_context<Input>&, const lexy::error<Reader, lexy::expected_keyword>& error) const
+    {
+        errors->record(error.position(),
+                       std::format("expected keyword '{}'", std::string_view(error.string(), error.length())));
+    }
+
+    template <typename Input, typename Reader>
+    void operator()(const lexy::error_context<Input>&,
+                    const lexy::error<Reader, lexy::expected_char_class>& error) const
+    {
+        errors->record(error.position(), std::format("expected {}", error.name()));
+    }
+};
+
+// Parses one line into a flat term list. Returns false after reporting a syntax
+// error, in which case the statement must not be built.
+inline bool parseStatementLine(std::string_view             lineText,
+                               std::size_t                  lineNo,
+                               std::vector<Term>&           terms,
+                               std::vector<TextDiagnostic>& diagnostics)
+{
+    LineErrors errors{lineText.data(), lineNo, &diagnostics, {}};
+    auto       input = lexy::string_input(lineText.data(), lineText.size());
+    auto       sc    = lexy::scan(input, ErrorCallback{&errors});
+
+    const char* const lineEnd = lineText.data() + lineText.size();
+
+    auto locOf = [&](const char* position) {
+        return SourceLoc{lineNo, static_cast<std::size_t>(position - lineText.data()) + 1};
+    };
+    auto rest = [&] {
+        return std::string_view(sc.position(), static_cast<std::size_t>(lineEnd - sc.position()));
+    };
+    auto skipBlank = [&] {
+        sc.parse(blankToken);
+    };
+    auto atEndOfLine = [&] {
+        return sc.is_at_eof() || sc.peek(ld::lit_c<'#'>);
+    };
+    auto captureIdent = [&] {
+        auto lexeme = sc.capture(identToken).value();
+        return std::string(lexeme.begin(), lexeme.end());
+    };
+
+    // Raises a syntax error at `position`; scanning stops.
+    auto fail = [&](const char* position, std::string message) {
+        errors.pendingMessage = std::move(message);
+        sc.fatal_error(syntax_error{}, position);
+        return false;
+    };
+
+    // Reports what was found at the current position instead of `expected`,
+    // or why the input there is invalid.
+    auto unexpected = [&](std::string_view expected) {
+        const Found found = describeFound(rest());
+        return fail(sc.position(), found.invalid ? found.text : std::format("{} but found {}", expected, found.text));
+    };
+
+    auto parseValue = [&](nlohmann::json& value) {
+        const char* const      start = sc.position();
+        const std::string_view text  = rest();
+
+        if (sc.peek(ld::lit_c<'"'>))
         {
-            out += std::format("    {}([{}]) --> {}[{}]\n", input, input, id, stage.type);
+            auto literal = scanStringLiteral(text);
+            if (!literal)
+            {
+                return fail(start, "unterminated string literal");
+            }
+            // Consume chunk by chunk up to the closing quote; an escaped quote
+            // or backslash is consumed on its own so it cannot end a chunk.
+            sc.parse(ld::lit_c<'"'>);
+            while (sc)
+            {
+                sc.parse(ld::until(stringStop));
+                if (!sc || sc.position()[-1] == '"')
+                {
+                    break;
+                }
+                if (!sc.branch(ld::lit_c<'"'>))
+                {
+                    sc.branch(ld::lit_c<'\\'>);
+                }
+            }
+            value = std::move(literal->value);
+            return static_cast<bool>(sc);
         }
-        if (stage.output)
+
+        if (const std::size_t length = numberLength(text))
         {
-            out += std::format("    {}[{}] --> {}([{}])\n", id, stage.type, *stage.output, *stage.output);
+            std::string error;
+            auto        number = numberValue(text.substr(0, length), error);
+            if (!number)
+            {
+                return fail(start, std::move(error));
+            }
+            for (std::size_t i = 0; i < length; ++i)
+            {
+                sc.parse(ld::ascii::character);
+            }
+            value = std::move(*number);
+            return true;
+        }
+
+        if (sc.peek(ld::ascii::alpha_underscore))
+        {
+            const std::string word = captureIdent();
+            value = word == "true" ? nlohmann::json(true) : word == "false" ? nlohmann::json(false) : nlohmann::json(word);
+            return true;
+        }
+
+        return unexpected("expected an argument value");
+    };
+
+    auto parseArgs = [&](nlohmann::json& config) {
+        const char* const open = sc.position();
+        sc.parse(ld::lit_c<'('>);
+        config = nlohmann::json::object();
+        while (true)
+        {
+            skipBlank();
+            if (sc.branch(ld::lit_c<')'>))
+            {
+                return true;
+            }
+            if (atEndOfLine())
+            {
+                return fail(open, "unterminated argument list; missing ')'");
+            }
+            if (sc.branch(ld::lit_c<','>))
+            {
+                continue;
+            }
+            if (!sc.peek(ld::ascii::alpha_underscore))
+            {
+                return unexpected("expected an argument name");
+            }
+            const std::string key = captureIdent();
+            skipBlank();
+            if (!sc.branch(ld::lit_c<'='>))
+            {
+                return unexpected(std::format("expected '=' after argument '{}'", key));
+            }
+            skipBlank();
+            nlohmann::json value;
+            if (!parseValue(value))
+            {
+                return false;
+            }
+            config[key] = std::move(value);
+        }
+    };
+
+    auto parseGroup = [&] {
+        const char* const open = sc.position();
+        Term              term;
+        term.kind = Term::Kind::Group;
+        term.loc  = locOf(open);
+        sc.parse(ld::lit_c<'('>);
+        while (true)
+        {
+            skipBlank();
+            if (sc.branch(ld::lit_c<')'>))
+            {
+                terms.push_back(std::move(term));
+                return true;
+            }
+            if (atEndOfLine())
+            {
+                return fail(open, "unterminated fan-in group; missing ')'");
+            }
+            if (sc.branch(ld::lit_c<','>))
+            {
+                continue;
+            }
+            if (!sc.peek(ld::ascii::alpha_underscore))
+            {
+                return unexpected("expected an edge name in group");
+            }
+            term.edges.push_back(captureIdent());
+        }
+    };
+
+    auto parseNamed = [&] {
+        Term term;
+        term.loc  = locOf(sc.position());
+        term.name = captureIdent();
+
+        // Optional `.key` (only meaningful for `out`).
+        skipBlank();
+        if (sc.branch(ld::lit_c<'.'>))
+        {
+            skipBlank();
+            if (!sc.peek(ld::ascii::alpha_underscore))
+            {
+                return unexpected("expected a key name after '.'");
+            }
+            term.key = captureIdent();
+            skipBlank();
+        }
+
+        // A trailing `(...)` makes this a stage application with arguments.
+        if (sc.peek(ld::lit_c<'('>))
+        {
+            term.kind = Term::Kind::Stage;
+            if (!parseArgs(term.config))
+            {
+                return false;
+            }
+        }
+        else if (isReserved(term.name))
+        {
+            term.kind = (term.name == "in") ? Term::Kind::Edge : Term::Kind::Boundary;
         }
         else
         {
-            out += std::format("    {}[{}] --> end([end])\n", id, stage.type);
+            // Positional edge/stage classification is resolved by buildStatement.
+            term.kind = Term::Kind::Edge;
+        }
+        terms.push_back(std::move(term));
+        return true;
+    };
+
+    auto parseTerm = [&] {
+        skipBlank();
+        if (sc.peek(ld::lit_c<'('>))
+        {
+            return parseGroup();
+        }
+        if (sc.peek(ld::ascii::alpha_underscore))
+        {
+            return parseNamed();
+        }
+        return unexpected("expected an edge, stage, or group");
+    };
+
+    skipBlank();
+    if (atEndOfLine())
+    {
+        return true; // blank or comment-only line
+    }
+    if (!parseTerm())
+    {
+        return false;
+    }
+    while (true)
+    {
+        skipBlank();
+        if (atEndOfLine())
+        {
+            return true;
+        }
+        if (!sc.branch(LEXY_LIT("->")))
+        {
+            return unexpected("expected '->'");
+        }
+        if (!parseTerm())
+        {
+            return false;
         }
     }
-    return out;
+}
+
+} // namespace lexy_impl
+
+} // namespace detail
+
+// Parses and structurally validates a graph program from text. All problems
+// (syntax and structure) are collected into GraphProgram::diagnostics, each
+// located by line/column and sorted by location.
+inline GraphProgram parseGraphProgram(std::string_view text)
+{
+    GraphProgram program;
+    std::size_t  outputIndex = 0;
+    std::size_t  lineNo      = 0;
+    std::size_t  pos         = 0;
+
+    while (pos <= text.size())
+    {
+        const std::size_t      newline = text.find('\n', pos);
+        const std::string_view line =
+            (newline == std::string_view::npos) ? text.substr(pos) : text.substr(pos, newline - pos);
+        ++lineNo;
+
+        std::vector<detail::Term> terms;
+        if (detail::lexy_impl::parseStatementLine(line, lineNo, terms, program.diagnostics) && !terms.empty())
+        {
+            detail::buildStatement(terms, program, outputIndex, program.diagnostics);
+        }
+
+        if (newline == std::string_view::npos)
+        {
+            break;
+        }
+        pos = newline + 1;
+    }
+
+    detail::validateProgram(program);
+    detail::sortDiagnostics(program.diagnostics);
+    return program;
+}
+
+namespace detail {
+
+// Escapes the characters that would end or confuse a quoted Mermaid label.
+inline std::string mermaidLabel(std::string_view text)
+{
+    std::string label;
+    for (char c : text)
+    {
+        if (c == '"')
+        {
+            label += "#quot;";
+        }
+        else if (c == '<')
+        {
+            label += "#lt;";
+        }
+        else if (c == '>')
+        {
+            label += "#gt;";
+        }
+        else
+        {
+            label += c;
+        }
+    }
+    return label;
+}
+
+} // namespace detail
+
+// Renders a parsed program as a Mermaid flowchart: stages are boxes (listing
+// their config), edges are rounded nodes, and every `-> end` gets its own
+// terminal node. Node ids are generated, so edge names never clash with Mermaid
+// keywords such as `end`.
+inline std::string toMermaid(const GraphProgram& program)
+{
+    std::unordered_map<std::string, std::string> outputLabels;
+    for (const auto& output : program.outputs)
+    {
+        outputLabels[output.edge] = output.key                   ? "out." + *output.key
+                                  : program.outputs.size() > 1 ? std::format("out[{}]", output.index)
+                                                               : std::string{"out"};
+    }
+
+    std::string                                  nodes;
+    std::string                                  links;
+    std::unordered_map<std::string, std::string> edgeIds;
+
+    auto edgeId = [&](const std::string& edge) -> std::string {
+        if (auto it = edgeIds.find(edge); it != edgeIds.end())
+        {
+            return it->second;
+        }
+        std::string id    = std::format("e{}", edgeIds.size());
+        auto        label = outputLabels.find(edge);
+        nodes += std::format("    {}([\"{}\"])\n", id,
+                             detail::mermaidLabel(label != outputLabels.end() ? label->second : edge));
+        edgeIds.emplace(edge, id);
+        return id;
+    };
+
+    std::size_t deadEnds = 0;
+    for (std::size_t i = 0; i < program.stages.size(); ++i)
+    {
+        const StageNode& stage = program.stages[i];
+
+        std::string label = detail::mermaidLabel(stage.type);
+        if (stage.config.is_object())
+        {
+            for (const auto& item : stage.config.items())
+            {
+                const std::string value = item.value().is_string() ? item.value().get<std::string>() : item.value().dump();
+                label += std::format("<br/>{}={}", detail::mermaidLabel(item.key()), detail::mermaidLabel(value));
+            }
+        }
+        nodes += std::format("    s{}[\"{}\"]\n", i, label);
+
+        for (const auto& input : stage.inputs)
+        {
+            links += std::format("    {} --> s{}\n", edgeId(input), i);
+        }
+        if (stage.output)
+        {
+            links += std::format("    s{} --> {}\n", i, edgeId(*stage.output));
+        }
+        else
+        {
+            nodes += std::format("    d{}[[\"end\"]]\n", deadEnds);
+            links += std::format("    s{} --> d{}\n", i, deadEnds);
+            ++deadEnds;
+        }
+    }
+    return "flowchart LR\n" + nodes + links;
 }
 
 } // namespace filterGraph::dsl
