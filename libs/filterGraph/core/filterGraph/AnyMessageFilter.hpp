@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filterGraph/core/filterGraph/MergeStage.hpp>
 #include <filterGraph/core/filterGraph/MessageFilter.hpp>
 
 #include <any>
@@ -30,6 +31,13 @@ public:
     // Hands the graph's context to the wrapped stage(s); see
     // MessageFilter::setContext.
     virtual void setContext(std::shared_ptr<GraphContext> context) = 0;
+
+    // The slot types of a merge stage (see MergeStage); empty for an untyped
+    // merge and for every stage that is not a merge.
+    virtual MergeSlotTypes mergeInputTypes() const
+    {
+        return {};
+    }
 };
 
 // Adapts a concrete MessageFilter<Filter::InType, Filter::OutType> to the
@@ -67,6 +75,15 @@ public:
     void setContext(std::shared_ptr<GraphContext> context) override
     {
         mFilter->setContext(std::move(context));
+    }
+
+    MergeSlotTypes mergeInputTypes() const override
+    {
+        if (const auto* merge = dynamic_cast<const MergeStage*>(mFilter.get()))
+        {
+            return merge->mergeInputTypes();
+        }
+        return {};
     }
 
 private:

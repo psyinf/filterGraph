@@ -14,6 +14,7 @@ target_sources(${PROJECT_NAME}
     core/filterGraph/JsonFilterGraph.hpp
     core/filterGraph/FanoutFilter.hpp
     core/filterGraph/JoinFilter.hpp
+    core/filterGraph/MergeStage.hpp
     core/filterGraph/MergeFilter.hpp
     core/filterGraph/GraphValidator.hpp
     core/filterGraph/GraphLang.hpp

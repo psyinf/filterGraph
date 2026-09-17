@@ -27,6 +27,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   thread-safe blackboard for side-channel data between stages
   (`set` / `get` / `getOr` / `contains` / `erase` / `update` / `clear`). It is a
   polymorphic base; derived contexts are recovered with `as<Derived>()`.
+- **`TypedMergeFilter<OutputType, InputTypes...>`** /
+  **`UniformMergeFilter<InputType, OutputType>`** /
+  **`registerTypedMergeFilter`** (`MergeFilter.hpp`) — merge stages that declare
+  their slot types. The DSL checks the edges of their fan-in group when the
+  graph is built (`slot 2 of 'Summarize' expects ... but edge 'msg' carries ...`,
+  `stage 'Summarize' takes 2 inputs but the group has 3`), so a mis-wired merge
+  no longer fails with a `std::bad_any_cast` on the first message. The stages
+  receive their slots as typed `std::optional`s (`std::nullopt` for a hole),
+  with no `any_cast` in user code. `MergeFilter` / `registerMergeFilter` declare
+  no slot types and keep their current, unchecked behaviour.
+- **`MergeStage` / `MergeSlotTypes`** (`MergeStage.hpp`, new header) — how a
+  merge stage declares its slot types; `AnyMessageFilter::mergeInputTypes()`
+  exposes them to the DSL. `MergeInputs` moved here from `MergeFilter.hpp`
+  (which still provides it).
 - **`MessageFilter::setContext` / `context()` / `sharedContext()`** — stages
   receive the graph's `GraphContext`. `FilterGraph`, `DslFilterGraph`,
   `JsonFilterGraph`, `AnyFilterChain`, `FanoutFilter` and `JoinFilter` create an
