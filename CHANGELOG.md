@@ -27,9 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   thread-safe blackboard for side-channel data between stages
   (`set` / `get` / `getOr` / `contains` / `erase` / `update` / `clear`). It is a
   polymorphic base; derived contexts are recovered with `as<Derived>()`.
-- **`MessageFilter::setContext` / `context()`** — stages receive the graph's
-  `GraphContext`. `FilterGraph`, `DslFilterGraph`, `JsonFilterGraph`,
-  `AnyFilterChain`, `FanoutFilter` and `JoinFilter` forward it to their stages.
+- **`MessageFilter::setContext` / `context()` / `sharedContext()`** — stages
+  receive the graph's `GraphContext`. `FilterGraph`, `DslFilterGraph`,
+  `JsonFilterGraph`, `AnyFilterChain`, `FanoutFilter` and `JoinFilter` create an
+  empty context when they are built and forward it to their stages, so stages of
+  a graph share one context without any setup; `setContext` replaces it (with
+  nullptr meaning "a fresh empty one"). `context()` returns a `GraphContext&`
+  and is never null, so stages need no null check; `sharedContext()` hands out
+  the `std::shared_ptr` for composites that forward it.
 
 ### Changed
 - **Breaking:** `AnyMessageFilter` has a new pure virtual

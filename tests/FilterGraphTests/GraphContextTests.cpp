@@ -60,22 +60,18 @@ class PublishFrameFilter : public MessageFilter<int>
 public:
     std::optional<int> filter(int&& value) override
     {
-        context()->set(FrameNo{static_cast<std::uint64_t>(value)});
+        context().set(FrameNo{static_cast<std::uint64_t>(value)});
         return value;
     }
 };
 
-// Replaces the message by the published frame number, or -1 without a context.
+// Replaces the message by the published frame number (0 if none was published).
 class ReadFrameFilter : public MessageFilter<int>
 {
 public:
     std::optional<int> filter(int&&) override
     {
-        if (!context())
-        {
-            return -1;
-        }
-        return static_cast<int>(context()->getOr(FrameNo{}).value);
+        return static_cast<int>(context().getOr(FrameNo{}).value);
     }
 };
 
@@ -85,7 +81,7 @@ class RecordFrameFilter : public MessageFilter<int>
 public:
     std::optional<int> filter(int&& value) override
     {
-        context()->set(SeenFrame{context()->getOr(FrameNo{}).value});
+        context().set(SeenFrame{context().getOr(FrameNo{}).value});
         return value;
     }
 };
@@ -97,11 +93,40 @@ std::shared_ptr<AnyMessageFilter> erase(std::shared_ptr<MessageFilter<int>> filt
 
 } // namespace
 
-TEST_CASE("A stage outside a graph has no context", "[GraphContext]")
+TEST_CASE("A stage outside a graph has an empty context of its own", "[GraphContext]")
 {
     ReadFrameFilter read;
-    REQUIRE(read.context() == nullptr);
-    REQUIRE(read.filter(5) == -1);
+    REQUIRE(read.sharedContext() != nullptr);
+    REQUIRE_FALSE(read.context().contains<FrameNo>());
+    REQUIRE(read.filter(5) == 0);
+
+    read.context().set(FrameNo{4});
+    REQUIRE(read.filter(5) == 4);
+
+    ReadFrameFilter other;
+    REQUIRE(other.sharedContext() != read.sharedContext());
+    REQUIRE_FALSE(other.context().contains<FrameNo>());
+}
+
+TEST_CASE("A graph gives its stages a shared context without setContext", "[GraphContext]")
+{
+    FilterGraph<PublishFrameFilter, ReadFrameFilter> graph(
+        std::make_shared<PublishFrameFilter>(), std::make_shared<ReadFrameFilter>());
+
+    REQUIRE(graph.sharedContext() != nullptr);
+    REQUIRE(graph.filter(5) == 5);
+    REQUIRE(graph.context().get<FrameNo>()->value == 5);
+}
+
+TEST_CASE("setContext(nullptr) installs a fresh empty context", "[GraphContext]")
+{
+    ReadFrameFilter read;
+    read.context().set(FrameNo{3});
+
+    read.setContext(nullptr);
+
+    REQUIRE(read.sharedContext() != nullptr);
+    REQUIRE_FALSE(read.context().contains<FrameNo>());
 }
 
 TEST_CASE("FilterGraph hands its context to every stage", "[GraphContext]")
@@ -112,7 +137,7 @@ TEST_CASE("FilterGraph hands its context to every stage", "[GraphContext]")
     auto ctx = std::make_shared<GraphContext>();
     graph.setContext(ctx);
 
-    REQUIRE(graph.context() == ctx);
+    REQUIRE(graph.sharedContext() == ctx);
     REQUIRE(graph.filter(5) == 5);
     REQUIRE(ctx->get<FrameNo>()->value == 5);
 }

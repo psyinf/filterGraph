@@ -48,6 +48,8 @@ public:
                 mChain.outputType().name(),
                 typeid(OutputType).name()));
         }
+
+        JsonFilterGraph::setContext(this->sharedContext());
     }
 
     std::optional<OutputType> filter(InputType&& data) override

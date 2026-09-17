@@ -60,7 +60,7 @@ public:
             throw std::runtime_error(
                 "JoinFilter: a Void-terminated path produces no value to join; join paths must produce a value");
         }
-        path->setContext(this->context());
+        path->setContext(this->sharedContext());
         mPaths.push_back(std::move(path));
     }
 

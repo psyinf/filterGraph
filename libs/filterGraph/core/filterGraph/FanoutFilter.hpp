@@ -43,7 +43,7 @@ public:
                 receiver->inputType().name(),
                 typeid(InputType).name()));
         }
-        receiver->setContext(this->context());
+        receiver->setContext(this->sharedContext());
         mReceivers.push_back(std::move(receiver));
     }
 

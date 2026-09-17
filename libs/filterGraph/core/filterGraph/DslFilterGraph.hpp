@@ -552,6 +552,8 @@ public:
             dsl::detail::sortDiagnostics(diagnostics);
             throw GraphError(std::move(diagnostics));
         }
+
+        DslFilterGraph::setContext(this->sharedContext());
     }
 
     std::optional<OutputType> filter(InputType&& data) override

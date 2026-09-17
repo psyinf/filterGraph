@@ -348,10 +348,8 @@ ctx->update<FrameNo>([](FrameNo& f) { ++f.value; });       // atomic; false if u
   reorders messages, a value such as a frame number may belong to another
   message than the one being processed.
 
-Hand the context to a graph once, before processing messages. Every graph type
-(`FilterGraph`, `DslFilterGraph`, `JsonFilterGraph`) and composite stage
-(`FanoutFilter`, `JoinFilter`, nested graphs) forwards it to its stages, which
-read it through `MessageFilter::context()`:
+There is always a context, so a stage never has to check for one. A stage
+reads it through `MessageFilter::context()`, which returns a `GraphContext&`:
 
 ```cpp
 class StampFrame : public MessageFilter<Image>
@@ -359,21 +357,40 @@ class StampFrame : public MessageFilter<Image>
 public:
     std::optional<Image> filter(Image&& image) override
     {
-        if (context()) // nullptr outside a graph or when no context was set
-        {
-            image.frame = context()->getOr(FrameNo{0}).value;
-        }
+        image.frame = context().getOr(FrameNo{0}).value;
         return std::move(image);
     }
 };
-
-DslFilterGraph<Image, Image> graph(text);
-graph.setContext(ctx);
 ```
+
+Every graph type (`FilterGraph`, `DslFilterGraph`, `JsonFilterGraph`) creates
+an empty context when it is built and hands it to its stages, and so does every
+composite stage (`FanoutFilter`, `JoinFilter`, nested graphs), including to
+receivers and paths added later. So stages of the same graph share one context
+out of the box:
+
+```cpp
+DslFilterGraph<Image, Image> graph(text);
+graph.context().set(FrameNo{1});     // the graph's own context
+```
+
+Call `setContext` to put a different context in its place — typically an
+application's derived one, or a single context shared by several graphs:
+
+```cpp
+graph.setContext(ctx);               // replaces the graph's own context
+```
+
+A stage that is not part of a graph keeps its own empty context, which nobody
+else sees: it works, but nothing is shared. Note that the graph a stage is
+added to overwrites the stage's context with its own, so hand a shared context
+to the graph rather than to individual stages. `setContext(nullptr)` installs a
+fresh empty context rather than none.
 
 `setContext` is not meant to be called while messages are being processed.
 Custom composite stages override it to forward the context to their inner
-stages.
+stages; `MessageFilter::sharedContext()` returns the `std::shared_ptr` to pass
+on.
 
 ## JSON format
 

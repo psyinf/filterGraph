@@ -32,6 +32,7 @@ public:
     explicit FilterGraph(std::shared_ptr<Filter> filter)
         : mFilter(std::move(filter))
     {
+        FilterGraph::setContext(this->sharedContext());
     }
 
     std::optional<OutType> filter(InType&& data) override
@@ -62,6 +63,7 @@ public:
         : mFilter(std::move(filter))
         , mNext(std::move(rest)...)
     {
+        FilterGraph::setContext(this->sharedContext());
     }
 
     std::optional<OutType> filter(InType&& data) override
