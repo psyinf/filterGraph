@@ -72,6 +72,9 @@ drops the message, and everything downstream of that edge is skipped.
 - **`GraphContext`** — a graph-scoped, type-keyed, thread-safe blackboard, so
   stages can share values without knowing who produced them. See
   [Graph context](#graph-context).
+- **`MessageFilter::finish()`** — the end-of-stream hook: a stage that
+  accumulates state flushes it when the graph is finished. See
+  [Ending a run](#ending-a-run).
 
 ### Runtime graphs in the text DSL
 
@@ -438,6 +441,57 @@ fresh empty context rather than none.
 Custom composite stages override it to forward the context to their inner
 stages; `MessageFilter::sharedContext()` returns the `std::shared_ptr` to pass
 on.
+
+## Ending a run
+
+A stage acts when a message reaches it, so a stage that accumulates something
+(statistics, a batch, an open file) has no natural point at which to flush it.
+`MessageFilter::finish()` is that point:
+
+```cpp
+class WriteReport : public MessageFilter<Record>
+{
+public:
+    std::optional<Record> filter(Record&& record) override
+    {
+        mSeen.push_back(record);
+        return std::move(record);
+    }
+
+    void finish() override // called once, after the last message
+    {
+        writeJson(mPath, mSeen);
+    }
+
+private:
+    std::vector<Record> mSeen;
+    std::filesystem::path mPath;
+};
+```
+
+```cpp
+DslFilterGraph<Record, Void> graph(text);
+for (auto&& record : records) { graph.filter(std::move(record)); }
+graph.finish(); // finishes every stage, in run order
+```
+
+- `finish()` defaults to a no-op, so existing stages are unaffected.
+- Every graph type and composite stage (`FilterGraph`, `DslFilterGraph`,
+  `JsonFilterGraph`, `AnyFilterChain`, `FanoutFilter`, `JoinFilter`, nested
+  graphs) forwards it to its stages. A `DslFilterGraph` finishes its stages in
+  run order, so a stage is finished after the stages it reads from.
+- **Every stage is finished even if one of them throws**; the first exception is
+  rethrown once the others have run.
+- `finish()` produces no message, so nothing is routed downstream. A stage that
+  wants to hand a final result to the application publishes it through the
+  [graph context](#graph-context) (or its own side channel).
+- Calling `finish()` is the owner's decision: a graph that is never finished
+  never flushes, and finishing twice finishes every stage twice.
+
+There is no `tick()`. Time is domain-specific (event time, wall clock, a sensor
+clock), so a stage that must act while no messages arrive is better served by an
+**in-band tick message**: make the graph's input type a variant with a `Tick`
+alternative and feed ticks through the graph like any other message.
 
 ## JSON format
 

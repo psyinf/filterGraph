@@ -68,6 +68,11 @@ public:
         MessageFilter<InputType, OutputType>::setContext(std::move(context));
     }
 
+    void finish() override
+    {
+        mChain.finish();
+    }
+
 private:
     AnyFilterChain mChain;
 };

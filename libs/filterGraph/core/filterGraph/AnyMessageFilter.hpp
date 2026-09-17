@@ -32,6 +32,10 @@ public:
     // MessageFilter::setContext.
     virtual void setContext(std::shared_ptr<GraphContext> context) = 0;
 
+    // Finishes the wrapped stage(s); see MessageFilter::finish. Pure, like
+    // setContext, so that a composite cannot silently fail to forward it.
+    virtual void finish() = 0;
+
     // The slot types of a merge stage (see MergeStage); empty for an untyped
     // merge and for every stage that is not a merge.
     virtual MergeSlotTypes mergeInputTypes() const
@@ -75,6 +79,11 @@ public:
     void setContext(std::shared_ptr<GraphContext> context) override
     {
         mFilter->setContext(std::move(context));
+    }
+
+    void finish() override
+    {
+        mFilter->finish();
     }
 
     MergeSlotTypes mergeInputTypes() const override

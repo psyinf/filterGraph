@@ -103,6 +103,16 @@ public:
         }
     }
 
+    void finish() override
+    {
+        detail::FinishScope finished;
+        for (auto& stage : mStages)
+        {
+            finished.run([&stage] { stage->finish(); });
+        }
+        finished.rethrow();
+    }
+
 private:
     std::vector<std::shared_ptr<AnyMessageFilter>> mStages;
     // Shared by the stages of this chain until a graph hands down its own, so
