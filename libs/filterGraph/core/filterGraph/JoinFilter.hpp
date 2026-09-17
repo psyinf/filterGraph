@@ -73,6 +73,16 @@ public:
         MessageFilter<InputType, OutputType>::setContext(std::move(context));
     }
 
+    void finish() override
+    {
+        detail::FinishScope finished;
+        for (auto& path : mPaths)
+        {
+            finished.run([&path] { path->finish(); });
+        }
+        finished.rethrow();
+    }
+
     std::optional<OutputType> filter(InputType&& data) override
     {
         std::vector<std::any> gathered;

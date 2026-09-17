@@ -37,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   receive their slots as typed `std::optional`s (`std::nullopt` for a hole),
   with no `any_cast` in user code. `MergeFilter` / `registerMergeFilter` declare
   no slot types and keep their current, unchecked behaviour.
+- **`MessageFilter::finish()`** — end-of-stream hook, called once after the last
+  message, so that a stage holding state can flush it (write a report, close a
+  file, publish a result to the `GraphContext`). It defaults to a no-op and
+  produces no message. `DslFilterGraph::finish()` finishes every stage in run
+  order; `FilterGraph`, `JsonFilterGraph`, `AnyFilterChain`, `FanoutFilter`,
+  `JoinFilter` and nested graphs forward it. Every stage is finished even if one
+  throws; the first exception is rethrown afterwards. There is no `tick()`: use
+  an in-band tick message (see README).
 - **`MergeStage` / `MergeSlotTypes`** (`MergeStage.hpp`, new header) — how a
   merge stage declares its slot types; `AnyMessageFilter::mergeInputTypes()`
   exposes them to the DSL. `MergeInputs` moved here from `MergeFilter.hpp`
@@ -51,9 +59,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `std::shared_ptr` for composites that forward it.
 
 ### Changed
-- **Breaking:** `AnyMessageFilter` has a new pure virtual
-  `setContext(std::shared_ptr<GraphContext>)`; custom implementations must
-  forward the context to the stages they wrap.
+- **Breaking:** `AnyMessageFilter` has new pure virtuals
+  `setContext(std::shared_ptr<GraphContext>)` and `finish()`; custom
+  implementations must forward both to the stages they wrap. They are pure
+  rather than no-ops on purpose: a composite that forgot to forward them would
+  otherwise fail silently.
 - README, EXAMPLE.md and `apps/textPipeline` now describe runtime graphs in the
   DSL first; the JSON format is documented as a supported alternative.
 - `dsl::toMermaid` now uses generated node ids (instead of edge names such as

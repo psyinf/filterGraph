@@ -46,6 +46,11 @@ public:
         MessageFilter<InType, OutType>::setContext(std::move(context));
     }
 
+    void finish() override
+    {
+        mFilter->finish();
+    }
+
 private:
     std::shared_ptr<Filter> mFilter;
 };
@@ -81,6 +86,14 @@ public:
         mFilter->setContext(context);
         mNext.setContext(context);
         MessageFilter<InType, OutType>::setContext(std::move(context));
+    }
+
+    void finish() override
+    {
+        detail::FinishScope finished;
+        finished.run([this] { mFilter->finish(); });
+        finished.run([this] { mNext.finish(); });
+        finished.rethrow();
     }
 
 private:

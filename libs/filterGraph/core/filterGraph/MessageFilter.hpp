@@ -2,12 +2,51 @@
 
 #include <filterGraph/core/filterGraph/GraphContext.hpp>
 
+#include <exception>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <utility>
 
 namespace filterGraph {
+
+namespace detail {
+
+// Finishes a group of stages: every stage is finished even if an earlier one
+// throws, and the first exception is rethrown afterwards. Composite stages use
+// it so that one failing stage cannot keep the others from flushing.
+class FinishScope
+{
+public:
+    template <typename Fn>
+    void run(Fn&& fn)
+    {
+        try
+        {
+            std::forward<Fn>(fn)();
+        }
+        catch (...)
+        {
+            if (!mFirstError)
+            {
+                mFirstError = std::current_exception();
+            }
+        }
+    }
+
+    void rethrow() const
+    {
+        if (mFirstError)
+        {
+            std::rethrow_exception(mFirstError);
+        }
+    }
+
+private:
+    std::exception_ptr mFirstError;
+};
+
+} // namespace detail
 
 // Base interface for a single processing stage. A MessageFilter consumes an
 // InputType (by rvalue reference, so it may move from / mutate it freely) and
@@ -30,6 +69,18 @@ public:
 
     virtual ~MessageFilter()                                    = default;
     virtual std::optional<OutputType> filter(InputType&& input) = 0;
+
+    // Called once after the last message, so that a stage holding state can
+    // flush it: write a report, close a file, publish a result to the
+    // GraphContext. It produces no message, so nothing is routed downstream;
+    // stages that need to emit a final value should publish it through the
+    // context or their own side channel.
+    //
+    // A graph calls finish() on its stages when the graph itself is finished.
+    // Composite stages override this to forward it to their inner stages.
+    // Calling it is the owner's decision: a graph that is never finished simply
+    // never flushes, and finishing twice finishes every stage twice.
+    virtual void finish() {}
 
     // Composite stages override this to forward the context to their inner
     // stages. Not meant to be called while messages are being processed.

@@ -484,6 +484,18 @@ public:
         }
     }
 
+    // Finishes every stage in run order, so that a stage sees its upstream
+    // stages finished before itself.
+    void finish()
+    {
+        filterGraph::detail::FinishScope finished;
+        for (auto& stage : mStages)
+        {
+            finished.run([&stage] { stage.filter->finish(); });
+        }
+        finished.rethrow();
+    }
+
 private:
     static constexpr std::size_t kInputSlot = 0;
 
@@ -634,6 +646,14 @@ public:
     {
         mPlan.setContext(context);
         MessageFilter<InputType, OutputType>::setContext(std::move(context));
+    }
+
+    // Finishes every stage of the graph, in run order; nested graphs are
+    // stages, so they finish their own stages in turn. See
+    // MessageFilter::finish.
+    void finish() override
+    {
+        mPlan.finish();
     }
 
     // The parsed graph, e.g. for dsl::toMermaid.

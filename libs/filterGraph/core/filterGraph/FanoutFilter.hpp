@@ -66,6 +66,16 @@ public:
         MessageFilter<InputType, InputType>::setContext(std::move(context));
     }
 
+    void finish() override
+    {
+        detail::FinishScope finished;
+        for (auto& receiver : mReceivers)
+        {
+            finished.run([&receiver] { receiver->finish(); });
+        }
+        finished.rethrow();
+    }
+
 private:
     std::vector<std::shared_ptr<AnyMessageFilter>> mReceivers;
 };
