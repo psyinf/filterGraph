@@ -1,11 +1,15 @@
 # filterGraph by example
 
-This walkthrough follows the runnable sample in
-[`apps/textPipeline/main.cpp`](apps/textPipeline/main.cpp), a small text
-pipeline that exercises every core building block: a **compile-time**
-`FilterGraph`, then **runtime graphs described in the text DSL** — a tap
-(fan-out), a merge (fan-in), several named outputs and up-front diagnostics —
-and finally the same kind of pipeline in the **JSON format**.
+This walkthrough follows three runnable samples under [`apps/`](apps/), all of
+them small text pipelines:
+
+| Sections | Sample | Covers |
+| --- | --- | --- |
+| 1–7 | [`textPipeline`](apps/textPipeline/main.cpp) | the core building blocks: a **compile-time** `FilterGraph`, **runtime graphs in the text DSL** (a tap, a merge, several named outputs, up-front diagnostics) and the same pipeline in the **JSON format** |
+| 8 | [`statefulPipeline`](apps/statefulPipeline/main.cpp) | stages that **carry state**: `finish()`, the `GraphContext`, a merge with per-instance state |
+| 9 | [`compositePipeline`](apps/compositePipeline/main.cpp) | **composition**: `JoinFilter`, a graph nested as a stage, a `Void` sink, in-band ticks |
+
+Start at the top: sections 8 and 9 assume the vocabulary of 1–7.
 
 ## Core concept: a chain of stages
 
@@ -440,21 +444,331 @@ returns every problem, located by a JSON pointer such as `/1/config/paths/0/0`.
 Unlike the DSL checks, it cannot see the graph's declared input/output types,
 and it stops type-checking across a `Fanout` or `Join`.
 
-## Build & run this example
+## 8. Stateful stages: `finish()` and the graph context
+
+The sections above transform one message at a time. Stages may also **carry
+state**: a stage instance lives as long as the graph it belongs to, so state in
+its members persists across messages, and every graph construction creates
+fresh instances. The second sample,
+[`apps/statefulPipeline/main.cpp`](apps/statefulPipeline/main.cpp), is about
+those stages.
+
+A stage that accumulates something has no natural point at which to report it —
+it only ever runs because a message arrived. `finish()` is that point:
+
+```cpp
+class CollectFilter : public MessageFilter<std::string>
+{
+public:
+    std::optional<std::string> filter(std::string&& line) override
+    {
+        ++mSummary.lines;
+        mSummary.words += countWords(line);
+        return std::move(line);      // the line itself passes through unchanged
+    }
+
+    void finish() override           // once, after the last message
+    {
+        std::cout << std::format("[collect] end of stream: {} lines, {} words\n",
+                                 mSummary.lines, mSummary.words);
+        context().set(mSummary);     // hand the result to the application
+    }
+
+private:
+    Summary mSummary;
+};
+```
+
+`finish()` produces no message, so a final *result* travels through the
+[graph context](README.md#graph-context) instead — a type-keyed blackboard that
+every stage of a graph shares:
+
+```cpp
+DslFilterGraph<std::string, std::string> graph("in -> Collect -> out");
+
+for (auto line : lines) { graph.filter(std::move(line)); }
+graph.finish();                                    // the owner's call
+
+const auto summary = graph.context().get<Summary>(); // std::optional<Summary>
+```
+
+```text
+[collect] end of stream: 3 lines, 12 words
+[app] read from the context: 3 lines, 12 words
+```
+
+Nothing is reported while messages flow, and a graph that is never finished
+never flushes.
+
+### A merge with per-instance state
+
+A merge stage may hold state too, but *how* it is registered decides whether
+that state is per instance or shared. Subclassing and registering a creator
+gives every instance its own — here a `TypedMergeFilter` with a sliding window
+whose size comes from the stage's arguments:
+
+```cpp
+class TrendFilter : public TypedMergeFilter<std::string, std::size_t, std::size_t>
+{
+public:
+    explicit TrendFilter(std::size_t window) : mWindow(window) {}
+
+    std::optional<std::string> merge(std::optional<std::size_t>&& length,
+                                     std::optional<std::size_t>&& words) override
+    { /* push length into mLengths, drop the oldest, average what is left */ }
+
+private:
+    std::size_t             mWindow;
+    std::deque<std::size_t> mLengths;
+};
+
+static FilterRegistrar<TrendFilter> registerTrend("Trend", [](const nlohmann::json& config) {
+    return std::make_shared<TrendFilter>(config.value("window", std::size_t{3}));
+});
+```
+
+```text
+in -> Length -> length
+in -> Words  -> words
+(length, words) -> Trend(window=2) -> out.short
+(length, words) -> Trend(window=3) -> out.long
+```
+
+Two instances of one stage type, each with its own window and its own history:
+
+```text
+[trend] short: chars=19 words=4 avg(last 2)=19.0
+[trend] long:  chars=19 words=4 avg(last 3)=19.0
+[trend] short: chars=10 words=2 avg(last 2)=14.5
+[trend] long:  chars=10 words=2 avg(last 3)=14.5
+[trend] short: chars=30 words=6 avg(last 2)=20.0
+[trend] long:  chars=30 words=6 avg(last 3)=19.7
+```
+
+`registerMergeFilter` (and `registerTypedMergeFilter`) behave differently on
+purpose: they **copy one combiner into every instance**, so whatever the
+combiner captures is shared by all of them — across instances *and* across
+graphs. The sample registers such a merge with a captured counter and uses it
+twice in one graph:
+
+```text
+[tally] call 1 of the one shared combiner (2 slots) / call 2 of the one shared combiner (2 slots)
+[tally] call 3 of the one shared combiner (2 slots) / call 4 of the one shared combiner (2 slots)
+[tally] call 5 of the one shared combiner (2 slots) / call 6 of the one shared combiner (2 slots)
+```
+
+The numbers run straight through both stages. For a stateless combiner that is
+exactly what you want; for state, use the `Trend` pattern above.
+
+### An application's own context
+
+`GraphContext` is a polymorphic base, so an application can derive its own and
+hand it to the graph. A stage recovers it with `as<AppContext>()`:
+
+```cpp
+class AppContext : public GraphContext
+{
+public:
+    explicit AppContext(std::string session) : sessionId(std::move(session)) {}
+    std::string sessionId;
+};
+
+auto context = std::make_shared<AppContext>("session-42");
+graph.setContext(context);      // give it to the GRAPH, not to single stages
+```
+
+```cpp
+const auto* app = context().as<AppContext>();   // nullptr if it is another type
+return app ? std::format("[{}] {}", app->sessionId, line) : std::move(line);
+```
+
+Give the context to the graph: a graph overwrites its stages' contexts with its
+own when they are built, so a context handed to a single stage would be
+replaced. A stage that calls `as<Derived>()` depends on that type, so reusable
+stages should stick to the type-keyed `set`/`get`.
+
+## 9. Composition: joins, nested graphs, sinks and ticks
+
+Every graph is itself a `MessageFilter`, which is what makes graphs composable.
+The third sample,
+[`apps/compositePipeline/main.cpp`](apps/compositePipeline/main.cpp), puts the
+composition features side by side.
+
+### A typed merge from a lambda, and its JSON twin
+
+Section 4 registered a merge from a combiner and section 4's *typed slots*
+subsection subclassed `TypedMergeFilter`. `registerTypedMergeFilter` is the
+third way: typed slots, registered from a lambda.
+
+```cpp
+registerTypedMergeFilter<std::string, std::string, std::string>(
+    "Concat",
+    [](std::optional<std::string>&& upper,
+       std::optional<std::string>&& reversed) -> std::optional<std::string> {
+        return std::format("{} | {}", upper.value_or("-"), reversed.value_or("-"));
+    });
+```
+
+```text
+in -> Upper   -> upper
+in -> Reverse -> reversed
+(upper, reversed) -> Concat -> out
+```
+
+The JSON format expresses the same shape as a **`JoinFilter`**: it scatters a
+copy of the message through each configured path and hands the gathered results
+to a C++ combiner (the paths come from configuration, the combiner cannot).
+
+```cpp
+registerJoinFilter<std::string, std::string>("Join", [](std::vector<std::any>&& slots) {
+    /* one slot per path, in path order; an empty slot is a hole */
+});
+```
+
+```json
+[
+  { "type": "Join", "config": { "paths": [
+      [ { "type": "Upper" } ],
+      [ { "type": "Reverse" } ]
+  ] } }
+]
+```
+
+Both print the same thing:
+
+```text
+[dsl]  COMPOSE ME | em esopmoc
+[json] COMPOSE ME | em esopmoc
+```
+
+### A graph as a stage
+
+A `DslFilterGraph` can be registered like any other stage, which makes a whole
+graph reusable inside another:
+
+```cpp
+static FilterRegistrar<DslFilterGraph<std::string, std::string>> registerInner(
+    "Inner", [](const nlohmann::json&) {
+        return std::make_shared<DslFilterGraph<std::string, std::string>>(
+            "in -> Tag -> tagged -> Count -> out");
+    });
+```
+
+```text
+in -> Inner -> inner -> Upper -> out
+```
+
+```mermaid
+flowchart LR
+    In(["in"]) --> Inner
+    subgraph Inner["Inner (a graph as a stage)"]
+        direction LR
+        T["Tag"] --> Tagged(["tagged"]) --> C["Count"]
+    end
+    Inner --> InnerEdge(["inner"]) --> U["Upper"] --> Out(["out"])
+```
+
+The outer graph hands its context to the nested one, and finishing the outer
+graph finishes the inner stages too — so `Tag` sees a value the *application*
+published, and `Count` reports when the outer graph is finished:
+
+```cpp
+graph.context().set(Tag{"[tagged] "});
+graph.filter(std::string{"nested graphs compose"});
+graph.filter(std::string{"and share a context"});
+graph.finish();
+```
+
+```text
+[outer] [TAGGED] NESTED GRAPHS COMPOSE
+[outer] [TAGGED] AND SHARE A CONTEXT
+[nested] the inner stage saw 2 message(s)
+```
+
+### A graph that only has side effects
+
+When every path ends in a sink, the graph has no consumable output: its stages
+are declared `MessageFilter<InputType, Void>` and its paths end in `end`.
+`Void` is a deliberate dead end, unlike `std::nullopt`, which means a message
+was dropped.
+
+```cpp
+class WriteFilter : public MessageFilter<std::string, Void>
+{
+public:
+    std::optional<Void> filter(std::string&& text) override
+    {
+        std::cout << "[sink] " << text << '\n';
+        return Void{};
+    }
+};
+
+DslFilterGraph<std::string, Void> graph(R"dsl(
+    in -> Upper   -> upper    -> Write -> end
+    in -> Reverse -> reversed -> Write -> end
+)dsl");
+
+const auto ran = graph.filter(std::string{"side effects only"}); // optional<Void>
+```
+
+```text
+[sink] SIDE EFFECTS ONLY
+[sink] ylno stceffe edis
+[sink] the graph ran: true
+```
+
+### Time: the in-band tick message
+
+There is no `tick()` hook, because time is domain-specific (event time, wall
+clock, a sensor clock). A stage that must act while no data arrives is fed
+**ticks as messages**: the graph's input type is a variant of the payload and a
+`Tick`, so ticks travel the same paths as everything else.
+
+```cpp
+struct Tick {};
+using Event = std::variant<std::string, Tick>;
+
+class BatchFilter : public MessageFilter<Event, std::string>
+{
+public:
+    std::optional<std::string> filter(Event&& event) override
+    {
+        if (const auto* line = std::get_if<std::string>(&event))
+        {
+            mBatch.push_back(*line);
+            return std::nullopt;   // buffered: nothing downstream runs
+        }
+        return flushBatch();       // a Tick emits what has accumulated
+    }
+    // finish() reports whatever is still buffered when the stream ends
+};
+
+DslFilterGraph<Event, std::string> graph("in -> Batch -> out");
+```
+
+```text
+[batch] first, second
+[batch] third
+[batch] 1 line(s) left unflushed at the end of the stream
+```
+
+## Build & run these examples
 
 ```powershell
 # Configure + build (pick a preset for your toolchain from CMakePresets.json)
 cmake --preset windows-msvc-release-user-mode
 cmake --build --preset windows-msvc-release-user-mode
 
-# Run the sample
+# Run the samples
 ./out/build/windows-msvc-release-user-mode/apps/textPipeline/textPipeline
+./out/build/windows-msvc-release-user-mode/apps/statefulPipeline/statefulPipeline
+./out/build/windows-msvc-release-user-mode/apps/compositePipeline/compositePipeline
 ```
 
 On Linux/macOS, use a matching preset such as `unixlike-gcc-release` or
 `unixlike-clang-release`.
 
-The complete output:
+The complete output of `textPipeline` (sections 1–7):
 
 ```text
 [compile-time] !HPARGRETLIF ,OLLEH
@@ -462,9 +776,61 @@ The complete output:
 [main] !hparGretlif ,olleH
 [tap] AB
 [merge] HELLO, FILTERGRAPH! | !hparGretlif ,olleH (1 hole)
+[typed] HELLO, FILTERGRAPH! (19 chars)
+[typed check] 3:20: slot 1 of 'Report' expects 'class std::basic_string<char,...>' but edge 'length' carries 'unsigned __int64'
+[typed check] 3:20: slot 2 of 'Report' expects 'unsigned __int64' but edge 'upper' carries 'class std::basic_string<char,...>'
 [outputs] upper=HELLO, FILTERGRAPH! length=19 long=dropped
 [check] 1:7: unknown stage type 'Uppercas' — did you mean 'Uppercase'?
 [check] 2:7: could not construct 'MinLength': [json.exception.out_of_range.403] key 'minLength' not found
 [json tap] HELLO, FILTERGRAPH!
 [json main] !hparGretlif ,olleH
+```
+
+(The `[typed check]` lines print the full `typeid(...).name()` spelling, which
+depends on the compiler; it is shortened here.)
+
+Of `statefulPipeline` (section 8):
+
+```text
+[collect] end of stream: 3 lines, 12 words
+[app] read from the context: 3 lines, 12 words
+
+[trend] short: chars=19 words=4 avg(last 2)=19.0
+[trend] long:  chars=19 words=4 avg(last 3)=19.0
+[trend] short: chars=10 words=2 avg(last 2)=14.5
+[trend] long:  chars=10 words=2 avg(last 3)=14.5
+[trend] short: chars=30 words=6 avg(last 2)=20.0
+[trend] long:  chars=30 words=6 avg(last 3)=19.7
+
+[tally] call 1 of the one shared combiner (2 slots) / call 2 of the one shared combiner (2 slots)
+[tally] call 3 of the one shared combiner (2 slots) / call 4 of the one shared combiner (2 slots)
+[tally] call 5 of the one shared combiner (2 slots) / call 6 of the one shared combiner (2 slots)
+
+[stamped] [session-42] the quick brown fox
+[stamped] [session-42] jumps over
+[stamped] [session-42] the lazy dog and keeps running
+[collect] end of stream: 3 lines, 15 words
+[app] session session-42 saw 3 lines
+```
+
+(15 words, not 12: in that last graph `Stamp` runs before `Collect`, so each
+line carries the session stamp as an extra word.)
+
+And of `compositePipeline` (section 9):
+
+```text
+[dsl]  COMPOSE ME | em esopmoc
+[json] COMPOSE ME | em esopmoc
+
+[outer] [TAGGED] NESTED GRAPHS COMPOSE
+[outer] [TAGGED] AND SHARE A CONTEXT
+[nested] the inner stage saw 2 message(s)
+
+[sink] SIDE EFFECTS ONLY
+[sink] ylno stceffe edis
+[sink] the graph ran: true
+
+[batch] first, second
+[batch] third
+[batch] 1 line(s) left unflushed at the end of the stream
 ```

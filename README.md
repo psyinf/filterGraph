@@ -11,8 +11,11 @@ paths, merge them back together, and drop/short-circuit messages — all without
 hard-coding the pipeline shape in source code.
 
 > **New here? Start with the [example walkthrough (EXAMPLE.md)](EXAMPLE.md)** —
-> a step-by-step, diagrammed tour of the runnable
-> [`apps/textPipeline`](apps/textPipeline/main.cpp) sample.
+> a step-by-step, diagrammed tour of three runnable samples:
+> [`apps/textPipeline`](apps/textPipeline/main.cpp) (the core building blocks),
+> [`apps/statefulPipeline`](apps/statefulPipeline/main.cpp) (stages that carry
+> state) and [`apps/compositePipeline`](apps/compositePipeline/main.cpp)
+> (composing graphs out of graphs).
 
 > **A note on the word "filter".** Here "filter" follows the Unix-pipeline and
 > media-graph (DirectShow / GStreamer / FFmpeg) tradition: a stage that reads a
@@ -567,11 +570,15 @@ Testing is enabled by default (`-DENABLE_TESTING=ON`); pass
 `-DENABLE_TESTING=OFF` to skip building the tests. Tests use Catch2 (fetched via
 CPM) and live under `tests/`.
 
-Run the bundled example directly after building:
+Run the bundled examples directly after building:
 
 ```powershell
 ./out/build/windows-msvc-release-user-mode/apps/textPipeline/textPipeline
+./out/build/windows-msvc-release-user-mode/apps/statefulPipeline/statefulPipeline
+./out/build/windows-msvc-release-user-mode/apps/compositePipeline/compositePipeline
 ```
+
+[EXAMPLE.md](EXAMPLE.md) walks through all three, with their output.
 
 ## Roadmap
 
@@ -579,8 +586,6 @@ Planned improvements, not yet implemented, live in [TODO.md](TODO.md) — each
 with what the library does today, the gap, an API sketch and the workaround
 available in the meantime. The current list:
 
-- **More examples** for `GraphContext`, `finish()`, stateful merges,
-  `JoinFilter`, nested graphs and the in-band tick pattern.
 - **Named merge slots**, so a fan-in group matches by name, not position.
 - **Several named graph inputs** (`in.orders`, `in.quotes`), mirroring
   `GraphOutputs`.
