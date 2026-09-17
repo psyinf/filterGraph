@@ -1,6 +1,9 @@
 #pragma once
 
+#include <filterGraph/core/filterGraph/GraphContext.hpp>
+
 #include <functional>
+#include <memory>
 #include <optional>
 #include <utility>
 
@@ -11,6 +14,11 @@ namespace filterGraph {
 // produces an std::optional<OutputType>: returning std::nullopt allows a
 // stage to short-circuit (terminate) a chain early, e.g. when a message
 // should be dropped/filtered out.
+//
+// A stage may read and publish side-channel data through context(), the
+// GraphContext of the graph it runs in. The graph hands it over once via
+// setContext() before messages are processed; a stage used outside a graph, or
+// in a graph without a context, sees nullptr.
 template <typename InputType, typename OutputType = InputType>
 class MessageFilter
 {
@@ -20,6 +28,21 @@ public:
 
     virtual ~MessageFilter()                                    = default;
     virtual std::optional<OutputType> filter(InputType&& input) = 0;
+
+    // Composite stages override this to forward the context to their inner
+    // stages. Not meant to be called while messages are being processed.
+    virtual void setContext(std::shared_ptr<GraphContext> context)
+    {
+        mContext = std::move(context);
+    }
+
+    [[nodiscard]] const std::shared_ptr<GraphContext>& context() const noexcept
+    {
+        return mContext;
+    }
+
+private:
+    std::shared_ptr<GraphContext> mContext;
 };
 
 // Generic terminal stage for a FilterGraph. Consumes InputType via a caller

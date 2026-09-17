@@ -92,6 +92,14 @@ public:
         return mStages.back()->outputType();
     }
 
+    void setContext(std::shared_ptr<GraphContext> context) override
+    {
+        for (auto& stage : mStages)
+        {
+            stage->setContext(context);
+        }
+    }
+
 private:
     std::vector<std::shared_ptr<AnyMessageFilter>> mStages;
 };

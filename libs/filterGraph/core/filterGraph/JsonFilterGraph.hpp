@@ -60,6 +60,12 @@ public:
         return std::any_cast<OutputType>(std::move(*result));
     }
 
+    void setContext(std::shared_ptr<GraphContext> context) override
+    {
+        mChain.setContext(context);
+        MessageFilter<InputType, OutputType>::setContext(std::move(context));
+    }
+
 private:
     AnyFilterChain mChain;
 };

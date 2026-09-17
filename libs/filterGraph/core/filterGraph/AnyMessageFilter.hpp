@@ -26,6 +26,10 @@ public:
 
     virtual std::type_index inputType() const  = 0;
     virtual std::type_index outputType() const = 0;
+
+    // Hands the graph's context to the wrapped stage(s); see
+    // MessageFilter::setContext.
+    virtual void setContext(std::shared_ptr<GraphContext> context) = 0;
 };
 
 // Adapts a concrete MessageFilter<Filter::InType, Filter::OutType> to the
@@ -58,6 +62,11 @@ public:
     std::type_index outputType() const override
     {
         return typeid(typename Filter::OutType);
+    }
+
+    void setContext(std::shared_ptr<GraphContext> context) override
+    {
+        mFilter->setContext(std::move(context));
     }
 
 private:

@@ -39,6 +39,12 @@ public:
         return mFilter->filter(std::move(data));
     }
 
+    void setContext(std::shared_ptr<GraphContext> context) override
+    {
+        mFilter->setContext(context);
+        MessageFilter<InType, OutType>::setContext(std::move(context));
+    }
+
 private:
     std::shared_ptr<Filter> mFilter;
 };
@@ -66,6 +72,13 @@ public:
             return std::nullopt;
         }
         return mNext.filter(std::move(*intermediate));
+    }
+
+    void setContext(std::shared_ptr<GraphContext> context) override
+    {
+        mFilter->setContext(context);
+        mNext.setContext(context);
+        MessageFilter<InType, OutType>::setContext(std::move(context));
     }
 
 private:

@@ -23,8 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`validateDslGraph<In, Out>(text)`** — every build-time diagnostic without
   throwing; `dsl::formatDiagnostic(s)` formats them as `line:column: message`.
 - `dsl::StageNode::fanIn` records whether a stage's inputs came from a group.
+- **`GraphContext`** (`GraphContext.hpp`) — a graph-scoped, type-keyed,
+  thread-safe blackboard for side-channel data between stages
+  (`set` / `get` / `getOr` / `contains` / `erase` / `update` / `clear`). It is a
+  polymorphic base; derived contexts are recovered with `as<Derived>()`.
+- **`MessageFilter::setContext` / `context()`** — stages receive the graph's
+  `GraphContext`. `FilterGraph`, `DslFilterGraph`, `JsonFilterGraph`,
+  `AnyFilterChain`, `FanoutFilter` and `JoinFilter` forward it to their stages.
 
 ### Changed
+- **Breaking:** `AnyMessageFilter` has a new pure virtual
+  `setContext(std::shared_ptr<GraphContext>)`; custom implementations must
+  forward the context to the stages they wrap.
 - README, EXAMPLE.md and `apps/textPipeline` now describe runtime graphs in the
   DSL first; the JSON format is documented as a supported alternative.
 - `dsl::toMermaid` now uses generated node ids (instead of edge names such as

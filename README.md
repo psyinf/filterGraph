@@ -69,6 +69,9 @@ drops the message, and everything downstream of that edge is skipped.
   runtime configuration overhead.
 - **`SinkFilter<InputType>`** — a generic terminal stage that forwards data to
   a caller-supplied `std::function` callback.
+- **`GraphContext`** — a graph-scoped, type-keyed, thread-safe blackboard, so
+  stages can share values without knowing who produced them. See
+  [Graph context](#graph-context).
 
 ### Runtime graphs in the text DSL
 
@@ -316,6 +319,61 @@ listing each stage's arguments.
 - Only the graph input type and the single `out` type are checked against the
   C++ template parameters; the types inside `GraphOutputs` are checked when
   they are read (`get<T>` throws `std::bad_any_cast` on a mismatch).
+
+## Graph context
+
+`GraphContext` (`GraphContext.hpp`) is a side channel for data that is not part
+of the message, such as a frame number published by one stage and read by
+another. The value's type is the key, so there is at most one value per type:
+
+```cpp
+struct FrameNo { std::uint64_t value; };   // wrap primitives in a dedicated type
+
+auto ctx = std::make_shared<GraphContext>();
+ctx->set(FrameNo{42});                                     // publish (replaces)
+std::optional<FrameNo> frame = ctx->get<FrameNo>();        // nullopt if unset
+FrameNo orDefault = ctx->getOr(FrameNo{0});
+ctx->update<FrameNo>([](FrameNo& f) { ++f.value; });       // atomic; false if unset
+```
+
+- Values are copied in and out under an internal lock, so a context can be
+  shared by concurrently running paths. Store `std::shared_ptr<T>` for heavy or
+  non-copyable data. The callback given to `update` must not access the context.
+- `GraphContext` is a polymorphic base: derive an application context, pass it
+  around as `std::shared_ptr<GraphContext>`, and recover it with
+  `ctx->as<AppContext>()` (`nullptr` if it is another type). Members added by a
+  derived class are not covered by the lock, and a stage calling `as<>` depends
+  on that type, so reusable stages should stick to `set` / `get`.
+- The context is graph-scoped, not per message: if the graph ever buffers or
+  reorders messages, a value such as a frame number may belong to another
+  message than the one being processed.
+
+Hand the context to a graph once, before processing messages. Every graph type
+(`FilterGraph`, `DslFilterGraph`, `JsonFilterGraph`) and composite stage
+(`FanoutFilter`, `JoinFilter`, nested graphs) forwards it to its stages, which
+read it through `MessageFilter::context()`:
+
+```cpp
+class StampFrame : public MessageFilter<Image>
+{
+public:
+    std::optional<Image> filter(Image&& image) override
+    {
+        if (context()) // nullptr outside a graph or when no context was set
+        {
+            image.frame = context()->getOr(FrameNo{0}).value;
+        }
+        return std::move(image);
+    }
+};
+
+DslFilterGraph<Image, Image> graph(text);
+graph.setContext(ctx);
+```
+
+`setContext` is not meant to be called while messages are being processed.
+Custom composite stages override it to forward the context to their inner
+stages.
 
 ## JSON format
 
