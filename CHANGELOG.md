@@ -49,6 +49,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   merge stage declares its slot types; `AnyMessageFilter::mergeInputTypes()`
   exposes them to the DSL. `MergeInputs` moved here from `MergeFilter.hpp`
   (which still provides it).
+- **`apps/statefulPipeline` and `apps/compositePipeline`** — two runnable
+  examples for the features `apps/textPipeline` does not cover.
+  `statefulPipeline` shows a stage that accumulates across messages and flushes
+  in `finish()`, hands its result to the application through the
+  `GraphContext`, a merge with per-instance state (subclass +
+  `FilterRegistrar`) next to the shared-combiner semantics of
+  `registerMergeFilter`, and an application's own derived context recovered
+  with `as<AppContext>()`. `compositePipeline` shows `registerTypedMergeFilter`
+  and the JSON `JoinFilter` side by side, a `DslFilterGraph` registered as a
+  stage of an outer graph (with `finish()` and the context reaching into it), a
+  `Void`-terminated sink graph, and the in-band tick message. EXAMPLE.md walks
+  through both in sections 8 and 9.
+- **`TODO.md`** — the planned work, with what the library does today, the gap,
+  an API sketch and the workaround for each item; the README roadmap summarizes
+  it.
 - **`MessageFilter::setContext` / `context()` / `sharedContext()`** — stages
   receive the graph's `GraphContext`. `FilterGraph`, `DslFilterGraph`,
   `JsonFilterGraph`, `AnyFilterChain`, `FanoutFilter` and `JoinFilter` create an
