@@ -575,15 +575,24 @@ Run the bundled example directly after building:
 
 ## Roadmap
 
-Planned improvements, not yet implemented:
+Planned improvements, not yet implemented, live in [TODO.md](TODO.md) — each
+with what the library does today, the gap, an API sketch and the workaround
+available in the meantime. The current list:
 
-- **Track which stage short-circuited.** When a graph drops a message, neither
-  `DslFilterGraph` nor `AnyFilterChain` currently tells the caller *which*
-  stage returned `std::nullopt`. They should record the stage (name and
-  location) and expose it, e.g. via an accessor or a richer result type, so
-  callers can diagnose where a message was filtered out. (The `Void` type
-  already distinguishes an *intentional* dead-end from a dropped message; this
-  item covers observing *unintentional* drops.)
+- **More examples** for `GraphContext`, `finish()`, stateful merges,
+  `JoinFilter`, nested graphs and the in-band tick pattern.
+- **Named merge slots**, so a fan-in group matches by name, not position.
+- **Several named graph inputs** (`in.orders`, `in.quotes`), mirroring
+  `GraphOutputs`.
+- **Stage labels and typed access** (`Summarize@stats`, `graph.stage<T>("stats")`).
+- **Track which stage short-circuited**, so a caller can see where a message
+  was dropped rather than only that it was.
+- **Config-aware `registerMergeFilter`**, a fresh combiner per instance.
+- **Injectable registry with duplicate detection**, instead of a singleton that
+  silently overwrites.
+- **Documentation** of 0..n outputs, fan-out copies and stateful stages.
+- **Lifting the current limitations**: nested stage arguments in the DSL, and
+  type checking inside `GraphOutputs`.
 
 ## License
 
