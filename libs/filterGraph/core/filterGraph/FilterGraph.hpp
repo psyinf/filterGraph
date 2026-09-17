@@ -32,11 +32,18 @@ public:
     explicit FilterGraph(std::shared_ptr<Filter> filter)
         : mFilter(std::move(filter))
     {
+        FilterGraph::setContext(this->sharedContext());
     }
 
     std::optional<OutType> filter(InType&& data) override
     {
         return mFilter->filter(std::move(data));
+    }
+
+    void setContext(std::shared_ptr<GraphContext> context) override
+    {
+        mFilter->setContext(context);
+        MessageFilter<InType, OutType>::setContext(std::move(context));
     }
 
 private:
@@ -56,6 +63,7 @@ public:
         : mFilter(std::move(filter))
         , mNext(std::move(rest)...)
     {
+        FilterGraph::setContext(this->sharedContext());
     }
 
     std::optional<OutType> filter(InType&& data) override
@@ -66,6 +74,13 @@ public:
             return std::nullopt;
         }
         return mNext.filter(std::move(*intermediate));
+    }
+
+    void setContext(std::shared_ptr<GraphContext> context) override
+    {
+        mFilter->setContext(context);
+        mNext.setContext(context);
+        MessageFilter<InType, OutType>::setContext(std::move(context));
     }
 
 private:

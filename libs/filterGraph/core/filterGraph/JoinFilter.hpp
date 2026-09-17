@@ -60,7 +60,17 @@ public:
             throw std::runtime_error(
                 "JoinFilter: a Void-terminated path produces no value to join; join paths must produce a value");
         }
+        path->setContext(this->sharedContext());
         mPaths.push_back(std::move(path));
+    }
+
+    void setContext(std::shared_ptr<GraphContext> context) override
+    {
+        for (auto& path : mPaths)
+        {
+            path->setContext(context);
+        }
+        MessageFilter<InputType, OutputType>::setContext(std::move(context));
     }
 
     std::optional<OutputType> filter(InputType&& data) override

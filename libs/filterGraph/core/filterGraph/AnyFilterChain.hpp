@@ -61,6 +61,8 @@ public:
 
             mStages.push_back(std::move(stage));
         }
+
+        AnyFilterChain::setContext(mContext);
     }
 
     std::optional<std::any> filter(std::any&& input) override
@@ -92,8 +94,20 @@ public:
         return mStages.back()->outputType();
     }
 
+    void setContext(std::shared_ptr<GraphContext> context) override
+    {
+        mContext = context ? std::move(context) : std::make_shared<GraphContext>();
+        for (auto& stage : mStages)
+        {
+            stage->setContext(mContext);
+        }
+    }
+
 private:
     std::vector<std::shared_ptr<AnyMessageFilter>> mStages;
+    // Shared by the stages of this chain until a graph hands down its own, so
+    // that a chain built on its own still has one context, not one per stage.
+    std::shared_ptr<GraphContext> mContext = std::make_shared<GraphContext>();
 };
 
 } // namespace filterGraph

@@ -431,6 +431,14 @@ public:
         return mOutputKeys;
     }
 
+    void setContext(const std::shared_ptr<GraphContext>& context)
+    {
+        for (auto& stage : mStages)
+        {
+            stage.filter->setContext(context);
+        }
+    }
+
 private:
     static constexpr std::size_t kInputSlot = 0;
 
@@ -544,6 +552,8 @@ public:
             dsl::detail::sortDiagnostics(diagnostics);
             throw GraphError(std::move(diagnostics));
         }
+
+        DslFilterGraph::setContext(this->sharedContext());
     }
 
     std::optional<OutputType> filter(InputType&& data) override
@@ -573,6 +583,12 @@ public:
             }
             return std::any_cast<OutputType>(std::move(outputs.front()));
         }
+    }
+
+    void setContext(std::shared_ptr<GraphContext> context) override
+    {
+        mPlan.setContext(context);
+        MessageFilter<InputType, OutputType>::setContext(std::move(context));
     }
 
     // The parsed graph, e.g. for dsl::toMermaid.

@@ -43,6 +43,7 @@ public:
                 receiver->inputType().name(),
                 typeid(InputType).name()));
         }
+        receiver->setContext(this->sharedContext());
         mReceivers.push_back(std::move(receiver));
     }
 
@@ -54,6 +55,15 @@ public:
             receiver->filter(std::move(branchInput));
         }
         return std::move(data);
+    }
+
+    void setContext(std::shared_ptr<GraphContext> context) override
+    {
+        for (auto& receiver : mReceivers)
+        {
+            receiver->setContext(context);
+        }
+        MessageFilter<InputType, InputType>::setContext(std::move(context));
     }
 
 private:

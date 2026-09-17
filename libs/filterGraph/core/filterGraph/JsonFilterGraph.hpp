@@ -48,6 +48,8 @@ public:
                 mChain.outputType().name(),
                 typeid(OutputType).name()));
         }
+
+        JsonFilterGraph::setContext(this->sharedContext());
     }
 
     std::optional<OutputType> filter(InputType&& data) override
@@ -58,6 +60,12 @@ public:
             return std::nullopt;
         }
         return std::any_cast<OutputType>(std::move(*result));
+    }
+
+    void setContext(std::shared_ptr<GraphContext> context) override
+    {
+        mChain.setContext(context);
+        MessageFilter<InputType, OutputType>::setContext(std::move(context));
     }
 
 private:
