@@ -104,9 +104,10 @@ drops the message, and everything downstream of that edge is skipped.
 - **`validateDslGraph<In, Out>(text)`** — the same checks as construction,
   returned as a list of `line:column` diagnostics instead of a thrown
   **`GraphError`**.
-- **`dsl::parseGraphProgram`** / **`dsl::toMermaid`** / **`dsl::toDot`** —
-  parse a graph into its node/edge form and render it as a Mermaid flowchart or
-  a Graphviz DOT digraph. The parser is built on
+- **`dsl::parseGraphProgram`** / **`dsl::toMermaid`** / **`dsl::toDot`** /
+  **`dsl::toAscii`** — parse a graph into its node/edge form and render it as a
+  Mermaid flowchart, a Graphviz DOT digraph or a console listing. The parser is
+  built on
   [lexy](https://github.com/foonathan/lexy); the earlier hand-written parser is
   deprecated (`dsl::parseGraphProgramHandwritten` in `GraphLangHandwritten.hpp`).
 
@@ -437,6 +438,22 @@ from `typeid(...).name()`, so how they read depends on the compiler.
 `dsl::toMermaid(graph.program())`) renders a graph as a Mermaid flowchart,
 listing each stage's arguments. `dsl::toDot` renders the same picture as a
 Graphviz DOT digraph, for `dot -Tsvg` or, in a console, `graph-easy --as=boxart`.
+`dsl::toAscii` prints it as a text listing that needs no tool at all:
+
+```text
+in
+`-> Parse -> msg
+    +-> Validate -> valid
+    |   `-> Summarize (merge, see below)
+    `-> Summarize (merge, see below)
+
+(msg, valid)
+`-> Summarize -> out.stats
+```
+
+`toAscii(program, dsl::AsciiStyle::unicode)` draws the same listing with
+box-drawing characters (`├─►`, `└─►`); a Windows console shows them only with
+the UTF-8 code page (`chcp 65001`).
 
 ### Current limitations
 

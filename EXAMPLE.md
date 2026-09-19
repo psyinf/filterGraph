@@ -412,6 +412,18 @@ flowchart LR
 DOT digraph. Pipe it into `dot -Tsvg -o pipeline.svg` for an image, or into
 `graph-easy --as=boxart` to draw it in a console.
 
+Without any tool, `dsl::toAscii(pipeline.program())` prints it as a listing,
+one tree per input:
+
+```text
+in
++-> Uppercase -> shouted
+|   `-> Print(prefix="[tap] ") -> end
+`-> Reverse -> reversed
+    `-> MinLength(minLength=3) -> long
+        `-> Print(prefix="[main] ") -> out
+```
+
 ## 7. The same pipeline in JSON
 
 The JSON format remains supported and uses the same registered stages. JSON
