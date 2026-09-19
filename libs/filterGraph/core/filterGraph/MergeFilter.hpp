@@ -31,15 +31,19 @@ namespace filterGraph {
 // group's edges into it.
 //
 // The combiner has the same signature as JoinFilter's, so a combiner written
-// for a JSON Join can be reused as a DSL merge unchanged.
+// for a JSON Join can be reused as a DSL merge unchanged. Its slots are untyped;
+// they are named if `slotNames` is given (see MergeStage::mergeInputNames).
 template <typename OutputType>
-class MergeFilter : public MessageFilter<MergeInputs, OutputType>
+class MergeFilter
+    : public MessageFilter<MergeInputs, OutputType>
+    , public MergeStage
 {
 public:
     using Combiner = std::function<std::optional<OutputType>(MergeInputs&&)>;
 
-    explicit MergeFilter(Combiner combiner)
+    explicit MergeFilter(Combiner combiner, std::vector<std::string> slotNames = {})
         : mCombiner(std::move(combiner))
+        , mSlotNames(std::move(slotNames))
     {
     }
 
@@ -48,8 +52,14 @@ public:
         return mCombiner(std::move(inputs));
     }
 
+    std::vector<std::string> mergeInputNames() const override
+    {
+        return mSlotNames;
+    }
+
 private:
-    Combiner mCombiner;
+    Combiner                 mCombiner;
+    std::vector<std::string> mSlotNames;
 };
 
 // Registers MergeFilter<OutputType> under `name` for use as a DSL fan-in stage:
@@ -69,13 +79,34 @@ void registerMergeFilter(const std::string& name, typename MergeFilter<OutputTyp
         });
 }
 
+// Registers a merge with named slots, which a DSL group may match by name:
+//
+//     registerMergeFilter<Stats>("Summarize", {"raw", "checked"}, combiner);
+//     (checked: valid, raw: msg) -> Summarize -> stats
+//
+// The combiner receives the slots in the order of `slotNames`, whatever the
+// order of the group.
+template <typename OutputType>
+void registerMergeFilter(const std::string&                         name,
+                         std::vector<std::string>                   slotNames,
+                         typename MergeFilter<OutputType>::Combiner combiner)
+{
+    FilterRegistrar<MergeFilter<OutputType>> registrar(
+        name,
+        [combiner = std::move(combiner), slotNames = std::move(slotNames)](const nlohmann::json&) {
+            return std::make_shared<MergeFilter<OutputType>>(combiner, slotNames);
+        });
+}
+
 // TypedMergeFilter<OutputType, InputTypes...> is a merge stage that declares
 // the type of every one of its slots, so that the DSL checks the edges of its
 // fan-in group when the graph is built instead of failing with a
 // std::bad_any_cast on the first message.
 //
-// The slots arrive as std::optionals, in group order: an empty optional is a
-// hole left by a path that dropped the message. Implement merge():
+// The slots arrive as std::optionals, in slot order: an empty optional is a
+// hole left by a path that dropped the message. Override mergeInputNames() to
+// name the slots, so that a group can match them by name, in any order (see
+// MergeStage). Implement merge():
 //
 //     class Summarize : public TypedMergeFilter<Stats, Message, Valid>
 //     {
@@ -169,8 +200,9 @@ class CallableTypedMergeFilter : public TypedMergeFilter<OutputType, InputTypes.
 public:
     using Merger = std::function<std::optional<OutputType>(std::optional<InputTypes>&&...)>;
 
-    explicit CallableTypedMergeFilter(Merger merger)
+    explicit CallableTypedMergeFilter(Merger merger, std::vector<std::string> slotNames = {})
         : mMerger(std::move(merger))
+        , mSlotNames(std::move(slotNames))
     {
     }
 
@@ -179,8 +211,14 @@ public:
         return mMerger(std::move(inputs)...);
     }
 
+    std::vector<std::string> mergeInputNames() const override
+    {
+        return mSlotNames;
+    }
+
 private:
-    Merger mMerger;
+    Merger                   mMerger;
+    std::vector<std::string> mSlotNames;
 };
 
 } // namespace detail
@@ -202,6 +240,22 @@ void registerTypedMergeFilter(const std::string&                                
     FilterRegistrar<Stage> registrar(name, [merger = std::move(merger)](const nlohmann::json&) {
         return std::make_shared<Stage>(merger);
     });
+}
+
+// Registers a typed merge with named slots, one name per slot type:
+//
+//     registerTypedMergeFilter<Stats, Message, Valid>("Summarize", {"message", "valid"}, merger);
+//     (valid: checked, message: msg) -> Summarize -> stats
+template <typename OutputType, typename... InputTypes>
+void registerTypedMergeFilter(const std::string&                                                          name,
+                              std::vector<std::string>                                                    slotNames,
+                              typename detail::CallableTypedMergeFilter<OutputType, InputTypes...>::Merger merger)
+{
+    using Stage = detail::CallableTypedMergeFilter<OutputType, InputTypes...>;
+    FilterRegistrar<Stage> registrar(
+        name, [merger = std::move(merger), slotNames = std::move(slotNames)](const nlohmann::json&) {
+            return std::make_shared<Stage>(merger, slotNames);
+        });
 }
 
 } // namespace filterGraph

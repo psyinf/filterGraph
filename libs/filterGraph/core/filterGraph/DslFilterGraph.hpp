@@ -39,7 +39,8 @@
 //    empty edge are skipped, so the drop propagates downstream;
 //  - a merge `(a, b) -> Merge` receives one MergeInputs slot per edge, with
 //    empty slots ("holes") for dropped edges; it is skipped only when every
-//    edge is empty;
+//    edge is empty. The slots are in group order, or, for a group that names
+//    them, `(raw: a, checked: b)`, in the order the merge declares its names;
 //  - values routed to `end` are discarded; a stage producing Void must route
 //    to `end`.
 namespace filterGraph {
@@ -229,51 +230,164 @@ inline std::string describeEdge(const std::string& edge)
     return std::format("edge '{}'", edge);
 }
 
-// Checks the edges of a fan-in group against the slot types the merge stage
-// declares (MergeStage); an untyped merge declares none and is not checked.
-inline void checkMergeInputs(const StageNode&                                        node,
-                             const MergeSlotTypes&                                   slots,
-                             const std::unordered_map<std::string, std::type_index>& edgeTypes,
-                             std::vector<TextDiagnostic>&                            diagnostics)
+inline std::string joinNames(const std::vector<std::string>& names)
 {
-    if (slots.empty())
+    std::string text;
+    for (const auto& name : names)
     {
-        return;
+        text += text.empty() ? name : ", " + name;
+    }
+    return text;
+}
+
+// Checks the slot names a merge stage declares (MergeStage) against each other
+// and against its slot types.
+inline bool checkDeclaredSlotNames(const StageNode&                node,
+                                   const MergeSlotTypes&           types,
+                                   const std::vector<std::string>& names,
+                                   std::vector<TextDiagnostic>&    diagnostics)
+{
+    if (!types.empty() && !types.uniform && types.types.size() != names.size())
+    {
+        diagnostics.push_back({node.loc,
+                               std::format("stage '{}' declares {} slot names for {} slot types",
+                                           node.type,
+                                           names.size(),
+                                           types.types.size())});
+        return false;
+    }
+    std::unordered_set<std::string> seen;
+    for (const auto& name : names)
+    {
+        if (!seen.insert(name).second)
+        {
+            diagnostics.push_back({node.loc, std::format("stage '{}' declares slot '{}' twice", node.type, name)});
+            return false;
+        }
+    }
+    return true;
+}
+
+// Matches the named slots of a fan-in group to the names the merge stage
+// declares, and returns the group's edges in the stage's slot order.
+inline std::optional<std::vector<std::string>> matchSlotNames(const StageNode&                node,
+                                                              const std::vector<std::string>& names,
+                                                              std::vector<TextDiagnostic>&    diagnostics)
+{
+    if (names.empty())
+    {
+        diagnostics.push_back(
+            {node.loc,
+             std::format("'{}' has no named slots; list the group's edges without names", node.type)});
+        return std::nullopt;
     }
 
-    if (!slots.uniform && slots.types.size() != node.inputs.size())
+    bool matched = true;
+    for (const auto& slot : node.slotNames)
+    {
+        if (std::find(names.begin(), names.end(), slot) == names.end())
+        {
+            std::string message = std::format("'{}' has no slot named '{}'", node.type, slot);
+            if (auto suggestion = filterGraph::detail::closestName(slot, names))
+            {
+                message += std::format(" \u2014 did you mean '{}'?", *suggestion);
+            }
+            message += std::format(" (its slots: {})", joinNames(names));
+            diagnostics.push_back({node.loc, std::move(message)});
+            matched = false;
+        }
+    }
+    for (const auto& name : names)
+    {
+        if (std::find(node.slotNames.begin(), node.slotNames.end(), name) == node.slotNames.end())
+        {
+            diagnostics.push_back(
+                {node.loc, std::format("the fan-in group does not feed slot '{}' of '{}'", name, node.type)});
+            matched = false;
+        }
+    }
+    if (!matched)
+    {
+        return std::nullopt;
+    }
+
+    // Both name lists are unique and contain each other: a permutation.
+    std::vector<std::string> edges;
+    edges.reserve(names.size());
+    for (const auto& name : names)
+    {
+        const auto position = std::find(node.slotNames.begin(), node.slotNames.end(), name) - node.slotNames.begin();
+        edges.push_back(node.inputs[static_cast<std::size_t>(position)]);
+    }
+    return edges;
+}
+
+// Wires a fan-in group to the slots its merge stage declares (MergeStage):
+// matches named slots by name and positional ones by position, checks the
+// edges against the declared slot types, and returns the group's edges in the
+// stage's slot order. An untyped merge with positional slots is not checked.
+// Problems are appended to `diagnostics`; the plan must then not be run.
+inline std::vector<std::string> wireMergeSlots(const StageNode&                                        node,
+                                               const MergeSlotTypes&                                   types,
+                                               const std::vector<std::string>&                         names,
+                                               const std::unordered_map<std::string, std::type_index>& edgeTypes,
+                                               std::vector<TextDiagnostic>&                            diagnostics)
+{
+    if (!names.empty() && !checkDeclaredSlotNames(node, types, names, diagnostics))
+    {
+        return node.inputs;
+    }
+
+    std::vector<std::string> edges = node.inputs;
+    if (!node.slotNames.empty())
+    {
+        auto ordered = matchSlotNames(node, names, diagnostics);
+        if (!ordered)
+        {
+            return node.inputs;
+        }
+        edges = std::move(*ordered);
+    }
+
+    // Named slots fix the count, even of an untyped or uniform merge.
+    const std::size_t slots = !names.empty() ? names.size()
+                            : !types.empty() && !types.uniform ? types.types.size()
+                                                               : edges.size();
+    if (slots != edges.size())
     {
         // Without a slot-to-edge correspondence, per-slot messages would only
         // repeat this one.
         diagnostics.push_back({node.loc,
                                std::format("stage '{}' takes {} inputs but the group has {}",
                                            node.type,
-                                           slots.types.size(),
-                                           node.inputs.size())});
-        return;
+                                           slots,
+                                           edges.size())});
+        return node.inputs;
     }
 
-    for (std::size_t slot = 0; slot < node.inputs.size(); ++slot)
+    for (std::size_t slot = 0; slot < edges.size() && !types.empty(); ++slot)
     {
-        const std::type_index expected = slots.uniform ? slots.types.front() : slots.types[slot];
-        const auto            type     = edgeTypes.find(node.inputs[slot]);
+        const std::type_index expected = types.uniform ? types.types.front() : types.types[slot];
+        const auto            type     = edgeTypes.find(edges[slot]);
         if (type != edgeTypes.end() && type->second != expected)
         {
+            const std::string label = names.empty() ? std::to_string(slot + 1) : std::format("'{}'", names[slot]);
             diagnostics.push_back({node.loc,
                                    std::format("slot {} of '{}' expects '{}' but {} carries '{}'",
-                                               slot + 1,
+                                               label,
                                                node.type,
                                                expected.name(),
-                                               describeEdge(node.inputs[slot]),
+                                               describeEdge(edges[slot]),
                                                type->second.name())});
         }
     }
+    return edges;
 }
 
 struct CompiledStage
 {
     std::shared_ptr<AnyMessageFilter> filter;
-    std::vector<std::size_t>          inputs;         // edge slots read by the stage
+    std::vector<std::size_t>          inputs;         // edge slots read by the stage (a merge's in slot order)
     std::optional<std::size_t>        output;         // edge slot written; nullopt => `end`
     bool                              merge = false;  // inputs are gathered into MergeInputs
 };
@@ -333,7 +447,8 @@ public:
                 continue;
             }
 
-            const bool merge = filter->inputType() == std::type_index(typeid(MergeInputs));
+            const bool               merge  = filter->inputType() == std::type_index(typeid(MergeInputs));
+            std::vector<std::string> inputs = node.inputs;
             if (node.fanIn && !merge)
             {
                 diagnostics.push_back(
@@ -352,7 +467,8 @@ public:
             }
             else if (merge)
             {
-                checkMergeInputs(node, filter->mergeInputTypes(), edgeTypes, diagnostics);
+                inputs = wireMergeSlots(node, filter->mergeInputTypes(), filter->mergeInputNames(), edgeTypes,
+                                        diagnostics);
             }
             else
             {
@@ -386,7 +502,7 @@ public:
             CompiledStage stage;
             stage.filter = std::move(filter);
             stage.merge  = merge;
-            for (const auto& edge : node.inputs)
+            for (const auto& edge : inputs)
             {
                 stage.inputs.push_back(slotOf(edge));
             }

@@ -254,7 +254,9 @@ edge -> Stage -> edge -> Stage(key=value) -> edge
   stage, one slot per edge, in the order listed. A merge either declares its
   slot types (see [Typed merges](#typed-merges)) or takes them untyped as
   `MergeInputs` (`std::vector<std::any>`), as
-  `registerMergeFilter<OutputType>(name, combiner)` does.
+  `registerMergeFilter<OutputType>(name, combiner)` does. A group may name the
+  slots of a merge that declares names, `(raw: msg, checked: valid) -> Merge`,
+  and is then matched by name, in any order (see [Named slots](#named-slots)).
 - `#` starts a comment that runs to the end of the line.
 
 ### How a graph runs
@@ -312,6 +314,42 @@ Mis-wiring a group is then a build-time diagnostic, not a wrong result:
 
 `MergeFilter` / `registerMergeFilter` declare no slot types; their edges stay
 unchecked, and the combiner reads the slots with `std::any_cast`.
+
+### Named slots
+
+Slot types cannot tell two slots of the *same* type apart: written in the wrong
+order, they pass every check and run silently wrong. A merge can therefore name
+its slots, and a group can refer to them by name:
+
+```cpp
+class Compare : public TypedMergeFilter<Verdict, Stats, Stats>
+{
+public:
+    std::optional<Verdict> merge(std::optional<Stats>&& before, std::optional<Stats>&& after) override { ... }
+
+    std::vector<std::string> mergeInputNames() const override { return {"before", "after"}; }
+};
+
+// The same for merges registered from a function:
+registerTypedMergeFilter<Verdict, Stats, Stats>("Compare", {"before", "after"}, merger);
+registerMergeFilter<Verdict>("CompareAny", {"before", "after"}, combiner);
+```
+
+```text
+(after: current, before: baseline) -> Compare -> verdict
+```
+
+- A **named group** is matched by name, so its order does not matter: the merge
+  receives its slots in the order it declares them. An unknown name
+  (`'Compare' has no slot named 'befor' — did you mean 'before'?`) and a slot
+  the group does not feed are build-time diagnostics.
+- A **positional group** still works with a merge that names its slots, matched
+  by position, so existing graphs stay valid. A merge that names its slots has
+  exactly that many.
+- A group may name all of its slots or none. Naming the slots of a merge that
+  declares no names is an error.
+
+`dsl::toMermaid` labels the links of a named group with the slot names.
 
 ### Choosing the output type
 
@@ -586,7 +624,6 @@ Planned improvements, not yet implemented, live in [TODO.md](TODO.md) — each
 with what the library does today, the gap, an API sketch and the workaround
 available in the meantime. The current list:
 
-- **Named merge slots**, so a fan-in group matches by name, not position.
 - **Several named graph inputs** (`in.orders`, `in.quotes`), mirroring
   `GraphOutputs`.
 - **Stage labels and typed access** (`Summarize@stats`, `graph.stage<T>("stats")`).

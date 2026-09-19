@@ -271,6 +271,49 @@ compiler; they are shortened here.)
 lambda, and `UniformMergeFilter<In, Out>` covers the other shape: any number of
 slots, all of the same type (N variants of one computation, combined).
 
+### Named slots
+
+Slot types cannot catch everything: when two slots have the *same* type,
+swapping them still passes validation. A merge can name its slots so that the
+group says which edge goes where:
+
+```cpp
+class CompareFilter : public TypedMergeFilter<std::string, std::string, std::string>
+{
+public:
+    std::optional<std::string> merge(std::optional<std::string>&& before,
+                                     std::optional<std::string>&& after) override
+    {
+        return std::format("{} => {}", before.value_or("-"), after.value_or("-"));
+    }
+
+    std::vector<std::string> mergeInputNames() const override
+    {
+        return {"before", "after"};
+    }
+};
+static FilterRegistrar<CompareFilter> registerCompare("Compare");
+```
+
+```cpp
+DslFilterGraph<std::string, int> pipeline(R"dsl(
+    in -> Uppercase -> upper
+    upper -> Reverse -> reversed
+    (after: reversed, before: upper) -> Compare -> compared -> Print(prefix="[named] ") -> out
+)dsl");
+
+pipeline.filter(std::string{"Hello, filterGraph!"});
+```
+
+```text
+[named] HELLO, FILTERGRAPH! => !HPARGRETLIF ,OLLEH
+```
+
+The group lists `after` first, but the slots are matched by name, so `merge()`
+still receives `before` first. A misspelled name, or a slot the group leaves
+out, is reported when the graph is built. A group without names still feeds
+`Compare` by position.
+
 ## 5. Several named outputs
 
 A graph can have more than one output. `out.<key>` names each one, and the
@@ -779,6 +822,7 @@ The complete output of `textPipeline` (sections 1–7):
 [typed] HELLO, FILTERGRAPH! (19 chars)
 [typed check] 3:20: slot 1 of 'Report' expects 'class std::basic_string<char,...>' but edge 'length' carries 'unsigned __int64'
 [typed check] 3:20: slot 2 of 'Report' expects 'unsigned __int64' but edge 'upper' carries 'class std::basic_string<char,...>'
+[named] HELLO, FILTERGRAPH! => !HPARGRETLIF ,OLLEH
 [outputs] upper=HELLO, FILTERGRAPH! length=19 long=dropped
 [check] 1:7: unknown stage type 'Uppercas' — did you mean 'Uppercase'?
 [check] 2:7: could not construct 'MinLength': [json.exception.out_of_range.403] key 'minLength' not found

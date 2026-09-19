@@ -61,6 +61,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stage of an outer graph (with `finish()` and the context reaching into it), a
   `Void`-terminated sink graph, and the in-band tick message. EXAMPLE.md walks
   through both in sections 8 and 9.
+- **Named merge slots** — a fan-in group can name the slots of a merge,
+  `(raw: msg, checked: valid) -> Merge`, and is then matched by name, in any
+  order: the merge receives its slots in the order it declares them. A merge
+  declares names with `MergeStage::mergeInputNames()` (override it in a
+  `TypedMergeFilter` / `UniformMergeFilter` subclass), or with the new
+  overloads `registerTypedMergeFilter<Out, Ins...>(name, slotNames, merger)`
+  and `registerMergeFilter<Out>(name, slotNames, combiner)`. Unknown or missing
+  names, a group that names only some slots, and names on a merge that declares
+  none are build-time diagnostics; type mismatches name the slot
+  (`slot 'raw' of 'Merge' expects ...`). Positional groups keep working and are
+  matched by position. `dsl::StageNode::slotNames` records the names, and
+  `dsl::toMermaid` labels the links with them.
 - **`TODO.md`** — the planned work, with what the library does today, the gap,
   an API sketch and the workaround for each item; the README roadmap summarizes
   it.
@@ -74,6 +86,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `std::shared_ptr` for composites that forward it.
 
 ### Changed
+- `MergeStage::mergeInputTypes()` is no longer pure; it defaults to no slot
+  types, so a merge can declare only names. `MergeFilter` now implements
+  `MergeStage`, and `AnyMessageFilter` has a new `mergeInputNames()`, which
+  defaults to none.
 - **Breaking:** `AnyMessageFilter` has new pure virtuals
   `setContext(std::shared_ptr<GraphContext>)` and `finish()`; custom
   implementations must forward both to the stages they wrap. They are pure

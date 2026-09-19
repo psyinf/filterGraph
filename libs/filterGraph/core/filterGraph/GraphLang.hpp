@@ -43,7 +43,9 @@
 //   optionally with config args `Name(k=v, k2="s", k3=true)`;
 // - fan-out = reuse an edge name as a source in several statements;
 // - fan-in = a source group `(a, b) -> Merge -> c`, where Merge is a merge
-//   stage (see registerMergeFilter in MergeFilter.hpp);
+//   stage (see registerMergeFilter in MergeFilter.hpp); the group may name the
+//   merge's slots, `(raw: a, checked: b) -> Merge -> c`, which matches them by
+//   name instead of by position;
 // - `#` starts a comment that runs to the end of the line.
 //
 // This header parses (with a lexy-based parser) and structurally validates a
@@ -73,6 +75,7 @@ struct StageNode
     std::vector<std::string>   inputs;  // source edge names ("in" allowed)
     std::optional<std::string> output;  // produced edge name ("$outN" for `out`); nullopt => routed to end
     bool                       fanIn = false; // inputs came from a group `(a, b) -> Stage`
+    std::vector<std::string>   slotNames; // per input, from `(name: edge, ...)`; empty for a positional group
     SourceLoc                  loc;
 };
 
@@ -282,7 +285,7 @@ inline Found describeFound(std::string_view rest)
         }
         return {false, std::format("'{}'", rest.substr(0, length))};
     }
-    if (c == '(' || c == ')' || c == ',' || c == '=' || c == '.')
+    if (c == '(' || c == ')' || c == ',' || c == '=' || c == '.' || c == ':')
     {
         return {false, std::format("'{}'", c)};
     }
@@ -307,8 +310,36 @@ struct Term
     std::optional<std::string> key;     // for `out.<key>`
     nlohmann::json             config;  // for Stage
     std::vector<std::string>   edges;   // for Group
+    std::vector<std::string>   slotNames; // for Group: per edge, from `name: edge`; "" when unnamed
     SourceLoc                  loc;
 };
+
+// Checks the slot names of a fan-in group: all slots are named or none, and no
+// name is used twice.
+inline bool checkSlotNames(const Term& group, std::vector<TextDiagnostic>& diags)
+{
+    const auto named = std::count_if(group.slotNames.begin(), group.slotNames.end(),
+                                     [](const std::string& name) { return !name.empty(); });
+    if (named == 0)
+    {
+        return true;
+    }
+    if (static_cast<std::size_t>(named) != group.slotNames.size())
+    {
+        diags.push_back({group.loc, "a fan-in group names either all of its slots or none, e.g. '(a: x, b: y)'"});
+        return false;
+    }
+    std::unordered_set<std::string> seen;
+    for (const auto& name : group.slotNames)
+    {
+        if (!seen.insert(name).second)
+        {
+            diags.push_back({group.loc, std::format("slot '{}' is named twice in the fan-in group", name)});
+            return false;
+        }
+    }
+    return true;
+}
 
 // Interprets a flat term list (edge, stage, edge, ...) into stage nodes, wiring
 // each stage's inputs from the previous edge/group and its output edge from the
@@ -371,6 +402,10 @@ inline void buildStatement(std::vector<Term>&           terms,
                 diags.push_back({terms[i].loc, "a fan-in group needs at least one edge"});
                 return;
             }
+            if (terms[i].kind == Term::Kind::Group && !checkSlotNames(terms[i], diags))
+            {
+                return;
+            }
         }
     }
 
@@ -389,6 +424,10 @@ inline void buildStatement(std::vector<Term>&           terms,
         {
             node.inputs = source.edges;
             node.fanIn  = true;
+            if (!source.slotNames.front().empty())
+            {
+                node.slotNames = source.slotNames;
+            }
         }
         else
         {
@@ -800,7 +839,21 @@ inline bool parseStatementLine(std::string_view             lineText,
             {
                 return unexpected("expected an edge name in group");
             }
-            term.edges.push_back(captureIdent());
+            // `edge`, or `name: edge` for a named slot.
+            std::string edge = captureIdent();
+            std::string slot;
+            skipBlank();
+            if (sc.branch(ld::lit_c<':'>))
+            {
+                skipBlank();
+                if (!sc.peek(ld::ascii::alpha_underscore))
+                {
+                    return unexpected(std::format("expected an edge name after '{}:'", edge));
+                }
+                slot = std::exchange(edge, captureIdent());
+            }
+            term.edges.push_back(std::move(edge));
+            term.slotNames.push_back(std::move(slot));
         }
     };
 
@@ -1000,9 +1053,18 @@ inline std::string toMermaid(const GraphProgram& program)
         }
         nodes += std::format("    s{}[\"{}\"]\n", i, label);
 
-        for (const auto& input : stage.inputs)
+        for (std::size_t slot = 0; slot < stage.inputs.size(); ++slot)
         {
-            links += std::format("    {} --> s{}\n", edgeId(input), i);
+            const std::string& input = stage.inputs[slot];
+            if (stage.slotNames.empty())
+            {
+                links += std::format("    {} --> s{}\n", edgeId(input), i);
+            }
+            else
+            {
+                links += std::format("    {} -->|\"{}\"| s{}\n", edgeId(input),
+                                     detail::mermaidLabel(stage.slotNames[slot]), i);
+            }
         }
         if (stage.output)
         {
