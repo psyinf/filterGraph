@@ -244,6 +244,7 @@ edge -> Stage -> edge -> Stage(key=value) -> edge
   | Name | Meaning |
   | --- | --- |
   | `in` | the graph's input; may only start a statement |
+  | `in.<key>` | a named input, for a graph with several (see [Several named inputs](#several-named-inputs)) |
   | `out` | the graph's output; may only end a statement |
   | `out.<key>` | a named output (several outputs are ordered as written) |
   | `end` | a dead end: the value is discarded (required for `Void` stages) |
@@ -374,6 +375,36 @@ outputs->get<std::size_t>(1);       // outputs can also be read by position
 outputs->has("length");             // false if that output's path dropped the message
 ```
 
+### Several named inputs
+
+A graph that consumes several kinds of message reads named inputs, `in.<key>`,
+and takes `GraphInputs` as its input type, mirroring `GraphOutputs`:
+
+```cpp
+DslFilterGraph<GraphInputs, Match> matcher(R"dsl(
+    in.orders -> ParseOrder -> order
+    in.quotes -> ParseQuote -> quote
+    (order, quote) -> Match -> out
+)dsl",
+    GraphInputs::of<Order, Quote>("orders", "quotes")); // optional: declared input types
+
+matcher.push("quotes", Quote{...});                     // one run, fed through in.quotes only
+matcher.filter(GraphInputs{}.set("orders", order).set("quotes", quote)); // one run, both inputs
+```
+
+- One `push` or `filter` is one run. An input not fed in that run is empty,
+  exactly like a dropped path: the stages reading it are skipped, and a merge
+  sees a hole.
+- `GraphInputs::of<Types...>(keys...)` declares the input types, which are then
+  checked like every other edge when the graph is built; a declared input the
+  graph never reads, and a read input that is not declared, are diagnostics.
+  Without a declaration, an input takes the type of the first stage that reads
+  it.
+- Feeding an unknown key throws `std::out_of_range`; a value whose type differs
+  from the input's (declared or inferred) type throws `std::invalid_argument`.
+- A graph uses either `in` or named inputs: `in` with `GraphInputs`, or
+  `in.<key>` with any other input type, is a build-time diagnostic.
+
 ### Checking and visualizing a graph
 
 `validateDslGraph` runs every construction check without running a message
@@ -407,9 +438,10 @@ listing each stage's arguments.
 
 - Stage arguments are flat `key=value` pairs; nested objects and lists are not
   expressible yet. Stages that need them can be configured in JSON.
-- Only the graph input type and the single `out` type are checked against the
-  C++ template parameters; the types inside `GraphOutputs` are checked when
-  they are read (`get<T>` throws `std::bad_any_cast` on a mismatch).
+- Only the graph input type, the declared named input types and the single
+  `out` type are checked against the C++ side; the types inside `GraphOutputs`
+  are checked when they are read (`get<T>` throws `std::bad_any_cast` on a
+  mismatch).
 
 ## Graph context
 
@@ -624,8 +656,6 @@ Planned improvements, not yet implemented, live in [TODO.md](TODO.md) — each
 with what the library does today, the gap, an API sketch and the workaround
 available in the meantime. The current list:
 
-- **Several named graph inputs** (`in.orders`, `in.quotes`), mirroring
-  `GraphOutputs`.
 - **Stage labels and typed access** (`Summarize@stats`, `graph.stage<T>("stats")`).
 - **Track which stage short-circuited**, so a caller can see where a message
   was dropped rather than only that it was.

@@ -30,9 +30,17 @@
 //   in -> Uppercase -> shouted -> Print(prefix="[tap] ") -> end
 //   in -> Reverse -> reversed -> MinLength(minLength=3) -> long -> Print -> out
 //
-// Execution semantics, per message:
+// A graph has one input `in`, or several named inputs `in.<key>` (with
+// GraphInputs as its input type):
+//
+//   in.orders -> ParseOrder -> order
+//   in.quotes -> ParseQuote -> quote
+//   (order, quote) -> Match -> out
+//
+// Execution semantics, per message (per run, for named inputs):
 //  - stages run in source order, except that a stage waits until every edge it
 //    reads has been produced;
+//  - a named input that is not fed in a run is empty, like a dropped edge;
 //  - fan-out: every reader of an edge gets its own copy of the value (the last
 //    reader receives it by move);
 //  - a stage returning std::nullopt leaves its edge empty; stages reading an
@@ -135,6 +143,87 @@ private:
     std::shared_ptr<const Keys> mKeys;
 };
 
+namespace dsl::detail {
+class GraphPlan;
+} // namespace dsl::detail
+
+// The declared types of a graph's named inputs; see GraphInputs::of.
+struct GraphInputTypes
+{
+    struct Input
+    {
+        std::string     key;
+        std::type_index type;
+    };
+
+    std::vector<Input> inputs;
+};
+
+// The values of one run of a graph with named inputs (`in.<key>`), the
+// counterpart of GraphOutputs. An input that is not set is empty in that run:
+// the stages reading it are skipped, exactly as for a dropped path.
+//
+//     graph.filter(GraphInputs{}.set("orders", order).set("quotes", quote));
+class GraphInputs
+{
+public:
+    // Declares the types of a graph's named inputs, one key per type, so that
+    // DslFilterGraph checks them when the graph is built:
+    //
+    //     DslFilterGraph<GraphInputs, Match> graph(text, GraphInputs::of<Order, Quote>("orders", "quotes"));
+    template <typename... Types, typename... Keys>
+    static GraphInputTypes of(Keys&&... keys)
+    {
+        static_assert(sizeof...(Types) == sizeof...(Keys), "GraphInputs::of needs one key per type");
+        return GraphInputTypes{
+            {GraphInputTypes::Input{std::string(std::forward<Keys>(keys)), std::type_index(typeid(Types))}...}};
+    }
+
+    // Sets the value of input `key`, replacing an earlier one.
+    template <typename T>
+    GraphInputs& set(std::string key, T&& value) &
+    {
+        for (auto& entry : mEntries)
+        {
+            if (entry.key == key)
+            {
+                entry.value = std::forward<T>(value);
+                return *this;
+            }
+        }
+        mEntries.push_back({std::move(key), std::any(std::forward<T>(value))});
+        return *this;
+    }
+
+    template <typename T>
+    GraphInputs&& set(std::string key, T&& value) &&
+    {
+        set(std::move(key), std::forward<T>(value));
+        return std::move(*this);
+    }
+
+    bool has(std::string_view key) const
+    {
+        return std::any_of(mEntries.begin(), mEntries.end(), [&](const Entry& entry) { return entry.key == key; });
+    }
+
+    std::size_t size() const
+    {
+        return mEntries.size();
+    }
+
+private:
+    friend class dsl::detail::GraphPlan;
+
+    struct Entry
+    {
+        std::string key;
+        std::any    value;
+    };
+
+    std::vector<Entry> mEntries;
+};
+
 // Thrown when a DSL graph cannot be built. what() lists every problem as
 // "line:column: message"; diagnostics() gives them individually.
 class GraphError : public std::runtime_error
@@ -191,6 +280,10 @@ ExpectedOutputs expectedOutputs()
 inline std::vector<std::size_t> runOrder(const GraphProgram& program)
 {
     std::unordered_set<std::string> produced{"in"};
+    for (const auto& input : program.inputs)
+    {
+        produced.insert(input.edge);
+    }
     std::vector<bool>               scheduled(program.stages.size(), false);
     std::vector<std::size_t>        order;
 
@@ -221,14 +314,32 @@ inline std::vector<std::size_t> runOrder(const GraphProgram& program)
     return order;
 }
 
-inline std::string describeEdge(const std::string& edge)
+// The types known for the edges of a graph while its plan is built. A named
+// input without a declared type takes the input type of the first stage that
+// reads it.
+struct EdgeTypes
 {
-    if (edge == "in")
+    std::unordered_map<std::string, std::type_index> types;
+    std::unordered_map<std::string, std::string>     inferredFrom; // input edge -> the stage that typed it
+
+    std::optional<std::type_index> find(const std::string& edge) const
     {
-        return "the graph input 'in'";
+        const auto type = types.find(edge);
+        return type != types.end() ? std::optional<std::type_index>(type->second) : std::nullopt;
     }
-    return std::format("edge '{}'", edge);
-}
+
+    std::string describe(const std::string& edge) const
+    {
+        if (isInputEdge(edge))
+        {
+            const auto reader = inferredFrom.find(edge);
+            return reader == inferredFrom.end()
+                     ? std::format("the graph input '{}'", edge)
+                     : std::format("the graph input '{}' (typed by its reader '{}')", edge, reader->second);
+        }
+        return std::format("edge '{}'", edge);
+    }
+};
 
 inline std::string joinNames(const std::vector<std::string>& names)
 {
@@ -327,11 +438,11 @@ inline std::optional<std::vector<std::string>> matchSlotNames(const StageNode&  
 // edges against the declared slot types, and returns the group's edges in the
 // stage's slot order. An untyped merge with positional slots is not checked.
 // Problems are appended to `diagnostics`; the plan must then not be run.
-inline std::vector<std::string> wireMergeSlots(const StageNode&                                        node,
-                                               const MergeSlotTypes&                                   types,
-                                               const std::vector<std::string>&                         names,
-                                               const std::unordered_map<std::string, std::type_index>& edgeTypes,
-                                               std::vector<TextDiagnostic>&                            diagnostics)
+inline std::vector<std::string> wireMergeSlots(const StageNode&                node,
+                                               const MergeSlotTypes&           types,
+                                               const std::vector<std::string>& names,
+                                               const EdgeTypes&                edgeTypes,
+                                               std::vector<TextDiagnostic>&    diagnostics)
 {
     if (!names.empty() && !checkDeclaredSlotNames(node, types, names, diagnostics))
     {
@@ -369,7 +480,7 @@ inline std::vector<std::string> wireMergeSlots(const StageNode&                 
     {
         const std::type_index expected = types.uniform ? types.types.front() : types.types[slot];
         const auto            type     = edgeTypes.find(edges[slot]);
-        if (type != edgeTypes.end() && type->second != expected)
+        if (type && *type != expected)
         {
             const std::string label = names.empty() ? std::to_string(slot + 1) : std::format("'{}'", names[slot]);
             diagnostics.push_back({node.loc,
@@ -377,8 +488,8 @@ inline std::vector<std::string> wireMergeSlots(const StageNode&                 
                                                label,
                                                node.type,
                                                expected.name(),
-                                               describeEdge(edges[slot]),
-                                               type->second.name())});
+                                               edgeTypes.describe(edges[slot]),
+                                               type->name())});
         }
     }
     return edges;
@@ -400,18 +511,23 @@ public:
     GraphPlan() = default;
 
     // Builds the plan, appending every problem found (bad config, type
-    // mismatches along edges, misused merges/Void, output shape) to
+    // mismatches along edges, misused merges/Void, inputs and output shape) to
     // `diagnostics`. The plan may only be run if no diagnostics were added.
+    // `declaredInputs` are the types of a GraphInputs graph's named inputs, if
+    // the caller declared them.
     GraphPlan(const GraphProgram&          program,
               std::type_index              inputType,
               const ExpectedOutputs&       expected,
+              const GraphInputTypes*       declaredInputs,
               std::vector<TextDiagnostic>& diagnostics)
     {
         std::unordered_map<std::string, std::size_t> slots;
         auto slotOf = [&slots](const std::string& edge) {
             return slots.try_emplace(edge, slots.size()).first->second;
         };
-        slotOf("in"); // always slot 0 (kInputSlot)
+
+        EdgeTypes edgeTypes;
+        bindInputs(program, inputType, declaredInputs, slotOf, edgeTypes, diagnostics);
 
         if (program.stages.empty())
         {
@@ -424,9 +540,7 @@ public:
             diagnostics.push_back({SourceLoc{}, "some stages can never run: an input is never produced or depends on itself"});
         }
 
-        auto&                                            registry = FilterRegistry::instance();
-        std::unordered_map<std::string, std::type_index> edgeTypes;
-        edgeTypes.emplace("in", inputType);
+        auto& registry = FilterRegistry::instance();
 
         for (std::size_t index : order)
         {
@@ -473,15 +587,21 @@ public:
             else
             {
                 const std::string& edge = node.inputs.front();
-                auto               type = edgeTypes.find(edge);
-                if (type != edgeTypes.end() && type->second != filter->inputType())
+                const auto         type = edgeTypes.find(edge);
+                if (!type && isInputEdge(edge))
+                {
+                    // An undeclared named input: its first reader types it.
+                    edgeTypes.types.emplace(edge, filter->inputType());
+                    edgeTypes.inferredFrom.emplace(edge, node.type);
+                }
+                else if (type && *type != filter->inputType())
                 {
                     diagnostics.push_back({node.loc,
                                            std::format("stage '{}' expects input type '{}' but {} carries '{}'",
                                                        node.type,
                                                        filter->inputType().name(),
-                                                       describeEdge(edge),
-                                                       type->second.name())});
+                                                       edgeTypes.describe(edge),
+                                                       type->name())});
                 }
             }
 
@@ -495,7 +615,7 @@ public:
                 }
                 else
                 {
-                    edgeTypes.emplace(*node.output, filter->outputType());
+                    edgeTypes.types.emplace(*node.output, filter->outputType());
                 }
             }
 
@@ -523,6 +643,11 @@ public:
 
         checkOutputs(program, expected, edgeTypes, diagnostics);
 
+        for (auto& input : mInputs)
+        {
+            input.type = edgeTypes.find(input.edge);
+        }
+
         mEdgeCount = slots.size();
         mReaders.assign(mEdgeCount, 0);
         for (const auto& stage : mStages)
@@ -534,13 +659,44 @@ public:
         }
     }
 
+    // Orders the values of a run of a GraphInputs graph for run(), checking
+    // their keys and, where known, their types.
+    std::vector<std::any> bind(GraphInputs&& inputs) const
+    {
+        std::vector<std::any> values(mInputs.size());
+        for (auto& entry : inputs.mEntries)
+        {
+            const auto input = std::find_if(mInputs.begin(), mInputs.end(), [&](const Input& candidate) {
+                return candidate.key == entry.key;
+            });
+            if (input == mInputs.end())
+            {
+                throw std::out_of_range(std::format("DslFilterGraph: the graph has no input named '{}'", entry.key));
+            }
+            if (input->type && entry.value.has_value() && std::type_index(entry.value.type()) != *input->type)
+            {
+                throw std::invalid_argument(std::format("DslFilterGraph: input '{}' expects '{}' but received '{}'",
+                                                        entry.key,
+                                                        input->type->name(),
+                                                        entry.value.type().name()));
+            }
+            values[static_cast<std::size_t>(input - mInputs.begin())] = std::move(entry.value);
+        }
+        return values;
+    }
+
     // Runs one message through the graph and returns the output slots, in DSL
     // order; an empty slot means that output's path dropped the message.
-    std::vector<std::any> run(std::any&& input) const
+    // `inputs` holds one value per graph input (see bind()); an empty one is
+    // not fed in this run.
+    std::vector<std::any> run(std::vector<std::any>&& inputs) const
     {
         std::vector<std::any>    edges(mEdgeCount);
         std::vector<std::size_t> remaining = mReaders;
-        edges[kInputSlot]                  = std::move(input);
+        for (std::size_t i = 0; i < mInputs.size() && i < inputs.size(); ++i)
+        {
+            edges[mInputs[i].slot] = std::move(inputs[i]);
+        }
 
         for (const auto& stage : mStages)
         {
@@ -613,7 +769,90 @@ public:
     }
 
 private:
-    static constexpr std::size_t kInputSlot = 0;
+    struct Input
+    {
+        std::string                    key;  // "" for the single input `in`
+        std::string                    edge; // "in" or "in.<key>"
+        std::size_t                    slot = 0;
+        std::optional<std::type_index> type; // declared or inferred; nullopt if unknown
+    };
+
+    // Registers the graph's inputs: the single `in`, or the named `in.<key>`
+    // of a GraphInputs graph, checked against the declared input types.
+    template <typename SlotOf>
+    void bindInputs(const GraphProgram&          program,
+                    std::type_index              inputType,
+                    const GraphInputTypes*       declared,
+                    SlotOf&                      slotOf,
+                    EdgeTypes&                   edgeTypes,
+                    std::vector<TextDiagnostic>& diagnostics)
+    {
+        if (inputType != std::type_index(typeid(GraphInputs)))
+        {
+            mInputs.push_back({"", "in", slotOf("in"), inputType});
+            edgeTypes.types.emplace("in", inputType);
+            for (const auto& input : program.inputs)
+            {
+                if (input.key)
+                {
+                    diagnostics.push_back(
+                        {input.loc,
+                         std::format("the named input '{}' needs GraphInputs as the graph's input type", input.edge)});
+                }
+            }
+            return;
+        }
+
+        for (const auto& input : program.inputs)
+        {
+            if (!input.key)
+            {
+                diagnostics.push_back({input.loc,
+                                       "the graph's input type is GraphInputs, so its inputs are named: write "
+                                       "'in.<key>' instead of 'in'"});
+                continue;
+            }
+            mInputs.push_back({*input.key, input.edge, slotOf(input.edge), std::nullopt});
+            if (!declared)
+            {
+                continue;
+            }
+            const auto type = std::find_if(declared->inputs.begin(), declared->inputs.end(),
+                                           [&](const GraphInputTypes::Input& d) { return d.key == *input.key; });
+            if (type == declared->inputs.end())
+            {
+                diagnostics.push_back({input.loc,
+                                       std::format("the graph reads '{}', but no input '{}' is declared",
+                                                   input.edge,
+                                                   *input.key)});
+            }
+            else
+            {
+                edgeTypes.types.emplace(input.edge, type->type);
+            }
+        }
+
+        if (!declared)
+        {
+            return;
+        }
+        std::unordered_set<std::string> seen;
+        for (const auto& input : declared->inputs)
+        {
+            if (!seen.insert(input.key).second)
+            {
+                diagnostics.push_back({SourceLoc{}, std::format("input '{}' is declared twice", input.key)});
+                continue;
+            }
+            const bool read = std::any_of(mInputs.begin(), mInputs.end(), [&](const Input& i) { return i.key == input.key; });
+            if (!read)
+            {
+                diagnostics.push_back(
+                    {SourceLoc{},
+                     std::format("input '{}' is declared but the graph never reads 'in.{}'", input.key, input.key)});
+            }
+        }
+    }
 
     // The last reader of an edge takes the value by move; earlier readers
     // (fan-out) each get their own copy.
@@ -626,10 +865,10 @@ private:
         return edges[edge];
     }
 
-    static void checkOutputs(const GraphProgram&                                     program,
-                             const ExpectedOutputs&                                  expected,
-                             const std::unordered_map<std::string, std::type_index>& edgeTypes,
-                             std::vector<TextDiagnostic>&                            diagnostics)
+    static void checkOutputs(const GraphProgram&          program,
+                             const ExpectedOutputs&       expected,
+                             const EdgeTypes&             edgeTypes,
+                             std::vector<TextDiagnostic>& diagnostics)
     {
         const auto& outputs = program.outputs;
         switch (expected.shape)
@@ -652,13 +891,12 @@ private:
                                  expected.type.name(),
                                  outputs.size())});
             }
-            else if (auto type = edgeTypes.find(outputs[0].edge);
-                     type != edgeTypes.end() && type->second != expected.type)
+            else if (auto type = edgeTypes.find(outputs[0].edge); type && *type != expected.type)
             {
                 diagnostics.push_back({outputs[0].loc,
                                        std::format("the graph's output type is '{}' but 'out' receives '{}'",
                                                    expected.type.name(),
-                                                   type->second.name())});
+                                                   type->name())});
             }
             break;
         case OutputShape::Multiple:
@@ -680,6 +918,7 @@ private:
         }
     }
 
+    std::vector<Input>                        mInputs; // input i is fed from run()'s inputs[i]
     std::vector<CompiledStage>                mStages;
     std::size_t                               mEdgeCount = 0;
     std::vector<std::size_t>                  mReaders; // per edge slot: number of stage inputs reading it
@@ -692,6 +931,12 @@ private:
 // DslFilterGraph<InputType, OutputType> builds a graph from DSL text (or an
 // already parsed GraphProgram) and exposes it as a MessageFilter, so it plugs
 // in anywhere a compile-time FilterGraph or a JsonFilterGraph can.
+//
+// InputType is the type of the single input `in`, or GraphInputs for a graph
+// with named inputs `in.<key>`. Such a graph runs once per filter() (several
+// inputs) or push() (one input); inputs not fed in a run are empty. Their types
+// can be declared with GraphInputs::of; an undeclared input is typed by the
+// first stage that reads it.
 //
 // OutputType selects the output boundary the graph must have:
 //  - any concrete type: exactly one `-> out` producing that type;
@@ -715,11 +960,75 @@ public:
     }
 
     explicit DslFilterGraph(dsl::GraphProgram program)
+        : DslFilterGraph(std::move(program), nullptr)
+    {
+    }
+
+    // A graph with named inputs whose types are declared, e.g.
+    // GraphInputs::of<Order, Quote>("orders", "quotes").
+    DslFilterGraph(std::string_view text, const GraphInputTypes& inputs)
+        requires std::is_same_v<InputType, GraphInputs>
+        : DslFilterGraph(dsl::parseGraphProgram(text), &inputs)
+    {
+    }
+
+    DslFilterGraph(dsl::GraphProgram program, const GraphInputTypes& inputs)
+        requires std::is_same_v<InputType, GraphInputs>
+        : DslFilterGraph(std::move(program), &inputs)
+    {
+    }
+
+    std::optional<OutputType> filter(InputType&& data) override
+    {
+        std::vector<std::any> inputs;
+        if constexpr (std::is_same_v<InputType, GraphInputs>)
+        {
+            inputs = mPlan.bind(std::move(data));
+        }
+        else
+        {
+            inputs.push_back(std::any(std::move(data)));
+        }
+        return collect(mPlan.run(std::move(inputs)));
+    }
+
+    // Runs the graph with a single named input; the others are empty in this
+    // run. Throws std::out_of_range for an unknown key and
+    // std::invalid_argument for a value of the wrong type.
+    template <typename T>
+    std::optional<OutputType> push(std::string key, T&& value)
+        requires std::is_same_v<InputType, GraphInputs>
+    {
+        return filter(GraphInputs{}.set(std::move(key), std::forward<T>(value)));
+    }
+
+    void setContext(std::shared_ptr<GraphContext> context) override
+    {
+        mPlan.setContext(context);
+        MessageFilter<InputType, OutputType>::setContext(std::move(context));
+    }
+
+    // Finishes every stage of the graph, in run order; nested graphs are
+    // stages, so they finish their own stages in turn. See
+    // MessageFilter::finish.
+    void finish() override
+    {
+        mPlan.finish();
+    }
+
+    // The parsed graph, e.g. for dsl::toMermaid.
+    const dsl::GraphProgram& program() const
+    {
+        return mProgram;
+    }
+
+private:
+    DslFilterGraph(dsl::GraphProgram program, const GraphInputTypes* inputs)
         : mProgram(std::move(program))
     {
         std::vector<dsl::TextDiagnostic> diagnostics = mProgram.diagnostics;
         mPlan = dsl::detail::GraphPlan(
-            mProgram, typeid(InputType), dsl::detail::expectedOutputs<OutputType>(), diagnostics);
+            mProgram, typeid(InputType), dsl::detail::expectedOutputs<OutputType>(), inputs, diagnostics);
         if (!diagnostics.empty())
         {
             dsl::detail::sortDiagnostics(diagnostics);
@@ -729,10 +1038,8 @@ public:
         DslFilterGraph::setContext(this->sharedContext());
     }
 
-    std::optional<OutputType> filter(InputType&& data) override
+    std::optional<OutputType> collect(std::vector<std::any>&& outputs) const
     {
-        std::vector<std::any> outputs = mPlan.run(std::any(std::move(data)));
-
         if constexpr (std::is_same_v<OutputType, Void>)
         {
             return Void{};
@@ -758,27 +1065,6 @@ public:
         }
     }
 
-    void setContext(std::shared_ptr<GraphContext> context) override
-    {
-        mPlan.setContext(context);
-        MessageFilter<InputType, OutputType>::setContext(std::move(context));
-    }
-
-    // Finishes every stage of the graph, in run order; nested graphs are
-    // stages, so they finish their own stages in turn. See
-    // MessageFilter::finish.
-    void finish() override
-    {
-        mPlan.finish();
-    }
-
-    // The parsed graph, e.g. for dsl::toMermaid.
-    const dsl::GraphProgram& program() const
-    {
-        return mProgram;
-    }
-
-private:
     dsl::GraphProgram       mProgram;
     dsl::detail::GraphPlan  mPlan;
 };
@@ -792,7 +1078,20 @@ std::vector<dsl::TextDiagnostic> validateDslGraph(std::string_view text)
     const dsl::GraphProgram          program     = dsl::parseGraphProgram(text);
     std::vector<dsl::TextDiagnostic> diagnostics = program.diagnostics;
     [[maybe_unused]] const dsl::detail::GraphPlan plan(
-        program, typeid(InputType), dsl::detail::expectedOutputs<OutputType>(), diagnostics);
+        program, typeid(InputType), dsl::detail::expectedOutputs<OutputType>(), nullptr, diagnostics);
+    dsl::detail::sortDiagnostics(diagnostics);
+    return diagnostics;
+}
+
+// The same for a graph with named inputs whose types are declared.
+template <typename InputType, typename OutputType = GraphOutputs>
+    requires std::is_same_v<InputType, GraphInputs>
+std::vector<dsl::TextDiagnostic> validateDslGraph(std::string_view text, const GraphInputTypes& inputs)
+{
+    const dsl::GraphProgram          program     = dsl::parseGraphProgram(text);
+    std::vector<dsl::TextDiagnostic> diagnostics = program.diagnostics;
+    [[maybe_unused]] const dsl::detail::GraphPlan plan(
+        program, typeid(InputType), dsl::detail::expectedOutputs<OutputType>(), &inputs, diagnostics);
     dsl::detail::sortDiagnostics(diagnostics);
     return diagnostics;
 }

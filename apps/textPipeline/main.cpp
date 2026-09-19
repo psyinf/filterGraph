@@ -3,8 +3,8 @@
 //  - MessageFilter: the base stage interface
 //  - FilterGraph: compile-time chaining of stages
 //  - FilterRegistry + DslFilterGraph: runtime graphs described in the text DSL,
-//    with fan-out (a "tap"), fan-in (merges, with typed and named slots) and
-//    several named outputs
+//    with fan-out (a "tap"), fan-in (merges, with typed and named slots),
+//    several named outputs and several named inputs
 //  - validateDslGraph: every problem in a broken graph, located by line:column
 //  - JsonFilterGraph: the JSON format, which remains supported
 #include <filterGraph/core/filterGraph/DslFilterGraph.hpp>
@@ -30,6 +30,7 @@
 using filterGraph::DslFilterGraph;
 using filterGraph::FilterGraph;
 using filterGraph::FilterRegistrar;
+using filterGraph::GraphInputs;
 using filterGraph::JsonFilterGraph;
 using filterGraph::MergeInputs;
 using filterGraph::MessageFilter;
@@ -288,6 +289,21 @@ int main()
                                  *outputs->get<std::string>("upper"),
                                  *outputs->get<std::size_t>("length"),
                                  outputs->has("long") ? "present" : "dropped");
+    }
+
+    // 4b) Several named inputs, with declared types. push() feeds one input
+    //     and runs only the stages it reaches; the other input is empty.
+    {
+        DslFilterGraph<GraphInputs> routes(R"dsl(
+            in.greeting -> Uppercase -> out.shouted
+            in.name -> Reverse -> out.reversed
+        )dsl",
+                                           GraphInputs::of<std::string, std::string>("greeting", "name"));
+
+        auto outputs = routes.push("name", std::string{"filterGraph"});
+        std::cout << std::format("[inputs] shouted={} reversed={}\n",
+                                 outputs->has("shouted") ? "present" : "not fed",
+                                 *outputs->get<std::string>("reversed"));
     }
 
     // 5) Problems are reported before anything runs: all of them at once, each

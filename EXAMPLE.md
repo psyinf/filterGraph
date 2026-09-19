@@ -356,6 +356,35 @@ The graph's output type decides what shape is allowed:
 | `GraphOutputs` | one or more `-> out` / `-> out.<key>` | all outputs; `std::nullopt` only if all were dropped |
 | `Void` | no outputs, only `-> end` | `Void{}` |
 
+### Several named inputs
+
+The mirror image: a graph can read several named inputs, `in.<key>`, with
+`GraphInputs` as its input type. Each `push()` is one run that feeds a single
+input; the stages that only an unfed input reaches are skipped, exactly as if
+their path had dropped the message:
+
+```cpp
+DslFilterGraph<GraphInputs> routes(R"dsl(
+    in.greeting -> Uppercase -> out.shouted
+    in.name -> Reverse -> out.reversed
+)dsl",
+                                   GraphInputs::of<std::string, std::string>("greeting", "name"));
+
+auto outputs = routes.push("name", std::string{"filterGraph"});
+std::cout << std::format("[inputs] shouted={} reversed={}\n",
+                         outputs->has("shouted") ? "present" : "not fed",
+                         *outputs->get<std::string>("reversed"));
+```
+
+```text
+[inputs] shouted=not fed reversed=hparGretlif
+```
+
+`GraphInputs::of` declares the input types, so they are checked when the graph
+is built; it is optional, and without it each input takes the type of the
+first stage that reads it. To feed several inputs in one run, pass them
+together: `routes.filter(GraphInputs{}.set("greeting", a).set("name", b))`.
+
 ## 6. Checking a graph before it runs
 
 Constructing a `DslFilterGraph` checks the whole graph before any message
@@ -824,6 +853,7 @@ The complete output of `textPipeline` (sections 1–7):
 [typed check] 3:20: slot 2 of 'Report' expects 'unsigned __int64' but edge 'upper' carries 'class std::basic_string<char,...>'
 [named] HELLO, FILTERGRAPH! => !HPARGRETLIF ,OLLEH
 [outputs] upper=HELLO, FILTERGRAPH! length=19 long=dropped
+[inputs] shouted=not fed reversed=hparGretlif
 [check] 1:7: unknown stage type 'Uppercas' — did you mean 'Uppercase'?
 [check] 2:7: could not construct 'MinLength': [json.exception.out_of_range.403] key 'minLength' not found
 [json tap] HELLO, FILTERGRAPH!

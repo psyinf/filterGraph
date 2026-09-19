@@ -18,18 +18,18 @@ Examples use the generic stages of the [README](README.md) (`Parse`,
 
 | # | Item | Impact | Compatibility | Workaround today |
 |---|------|--------|---------------|------------------|
-| 1 | [Several named graph inputs](#1-several-named-graph-inputs) | medium | additive (new graph shape) | `std::variant` input + select stages |
-| 2 | [Stage labels and typed access](#2-stage-labels-and-typed-access) | medium | additive (DSL syntax) | side registry filled by creator lambdas |
-| 3 | [Track which stage short-circuited](#3-track-which-stage-short-circuited) | medium | additive | tap the edge, or log in the stage |
-| 4 | [Config-aware `registerMergeFilter`](#4-config-aware-registermergefilter) | low | additive | subclass + `FilterRegistrar` creator |
-| 5 | [Injectable registry, duplicate detection](#5-injectable-registry-duplicate-detection) | low | mostly additive | unique names |
-| 6 | [Documentation: 0..n outputs, large messages](#6-documentation-0n-outputs-large-messages) | doc only | — | — |
-| 7 | [Known limitations to lift](#7-known-limitations-to-lift) | low–medium | additive | JSON config; read `GraphOutputs` carefully |
+| 1 | [Stage labels and typed access](#1-stage-labels-and-typed-access) | medium | additive (DSL syntax) | side registry filled by creator lambdas |
+| 2 | [Track which stage short-circuited](#2-track-which-stage-short-circuited) | medium | additive | tap the edge, or log in the stage |
+| 3 | [Config-aware `registerMergeFilter`](#3-config-aware-registermergefilter) | low | additive | subclass + `FilterRegistrar` creator |
+| 4 | [Injectable registry, duplicate detection](#4-injectable-registry-duplicate-detection) | low | mostly additive | unique names |
+| 5 | [Documentation: 0..n outputs, large messages](#5-documentation-0n-outputs-large-messages) | doc only | — | — |
+| 6 | [Known limitations to lift](#6-known-limitations-to-lift) | low–medium | additive | JSON config; read `GraphOutputs` carefully |
 
 Items of the same list that are done, and therefore not repeated here:
 **type-checked merge inputs** (`TypedMergeFilter` / `UniformMergeFilter` /
 `registerTypedMergeFilter`), **named merge slots**
-(`(raw: msg, checked: valid) -> Merge`, `MergeStage::mergeInputNames()`), the
+(`(raw: msg, checked: valid) -> Merge`, `MergeStage::mergeInputNames()`),
+**several named graph inputs** (`in.<key>`, `GraphInputs`), the
 **end-of-stream hook** (`MessageFilter::finish()`), all described in the
 README, and **examples for
 the newer features** — `apps/statefulPipeline` and `apps/compositePipeline`,
@@ -37,42 +37,7 @@ walked through in [EXAMPLE.md](EXAMPLE.md) sections 8 and 9.
 
 ---
 
-## 1. Several named graph inputs
-
-**Today.** A graph has exactly one input edge `in`, with one type. A graph that
-consumes several kinds of message needs a single `std::variant` input, and then
-every stage has to unpack it, or one "select" stage per alternative drops the
-others.
-
-**Proposal.** A graph with named inputs, mirroring `GraphOutputs`:
-
-```text
-in.orders -> ParseOrder -> order
-in.quotes -> ParseQuote -> quote
-(order, quote) -> Match -> out
-```
-
-```cpp
-DslFilterGraph<GraphInputs, OutputType> graph(text);
-graph.push("quotes", Quote{...});   // runs only the stages reachable from in.quotes
-```
-
-Semantics:
-
-- One `push` is one run.
-- Input edges not fed in this run are **holes**, exactly like dropped paths
-  today, so merges and outputs need no new rules.
-- Validation checks each named input's type at construction, which needs a way
-  to declare them, e.g. `GraphInputs::of<Order, Quote>("orders", "quotes")`.
-- `filter(GraphInputs&&)` stays available, for "push several inputs in one run".
-
-**Compatibility.** Additive: `DslFilterGraph<In, Out>` with a plain input type
-keeps the single `in` edge.
-
-**Workaround today.** A `std::variant` input plus one select stage per
-alternative, each dropping the alternatives it does not handle.
-
-## 2. Stage labels and typed access
+## 1. Stage labels and typed access
 
 **Today.** The owner of a `DslFilterGraph` cannot reach a stage instance. The
 DSL has no labels (`#` starts a comment), and the compiled plan is private.
@@ -102,7 +67,7 @@ auto& stats = graph.stage<SummarizeFilter>("stats"); // throws if unknown or the
 every instance it builds in a side registry, or have the stage publish what the
 owner needs through the `GraphContext`.
 
-## 3. Track which stage short-circuited
+## 2. Track which stage short-circuited
 
 **Today.** When a graph drops a message, neither `DslFilterGraph` nor
 `AnyFilterChain` tells the caller *which* stage returned `std::nullopt`.
@@ -123,7 +88,7 @@ so that variant needs an overload or an opt-in.
 **Workaround today.** Tap the suspect edge with a logging stage ending in `end`,
 or log inside the stage that decides to drop.
 
-## 4. Config-aware `registerMergeFilter`
+## 3. Config-aware `registerMergeFilter`
 
 **Today.** `registerMergeFilter<Out>(name, combiner)` ignores the DSL config and
 **copies one combiner into every instance**. A combiner lambda that captures a
@@ -153,7 +118,7 @@ one.
 
 **Workaround today.** Subclass and register with a creator lambda.
 
-## 5. Injectable registry, duplicate detection
+## 4. Injectable registry, duplicate detection
 
 **Today.** `FilterRegistry::instance()` is a process-wide singleton, and
 `registerFilter` **silently overwrites** an existing name.
@@ -182,7 +147,7 @@ Ship it behind a transition: warn first, or add
 **Workaround today.** Keep names unique, and register test fakes under their own
 names.
 
-## 6. Documentation: 0..n outputs, large messages
+## 5. Documentation: 0..n outputs, large messages
 
 No API change. These points belong in the README / EXAMPLE.md, because they come
 up as soon as stages carry state:
@@ -199,7 +164,7 @@ up as soon as stages carry state:
   its members persists across messages. Say explicitly that this is supported
   and intended, and that each graph construction creates fresh instances.
 
-## 7. Known limitations to lift
+## 6. Known limitations to lift
 
 The [current limitations](README.md#current-limitations) the README lists, as
 work items:

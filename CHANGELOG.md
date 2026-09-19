@@ -73,6 +73,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`slot 'raw' of 'Merge' expects ...`). Positional groups keep working and are
   matched by position. `dsl::StageNode::slotNames` records the names, and
   `dsl::toMermaid` labels the links with them.
+- **Several named graph inputs** — a graph can read named inputs,
+  `in.<key>`, with the new **`GraphInputs`** as its input type, mirroring
+  `GraphOutputs`. `DslFilterGraph::push(key, value)` runs the graph fed through
+  one input; `filter(GraphInputs{}.set(...).set(...))` feeds several in one
+  run. An input not fed in a run is empty, like a dropped path.
+  `GraphInputs::of<Types...>(keys...)` declares the input types for the new
+  `DslFilterGraph(text, inputTypes)` / `validateDslGraph(text, inputTypes)`
+  overloads, and they are checked when the graph is built; an undeclared input
+  takes the type of its first reader. Feeding an unknown key throws
+  `std::out_of_range`, a value of the wrong type `std::invalid_argument`.
+  `dsl::GraphProgram::inputs` lists the inputs a program reads.
 - **`TODO.md`** — the planned work, with what the library does today, the gap,
   an API sketch and the workaround for each item; the README roadmap summarizes
   it.
@@ -86,6 +97,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `std::shared_ptr` for composites that forward it.
 
 ### Changed
+- A `.<key>` on anything but `in` and `out` (e.g. `msg.x`) is now a diagnostic;
+  it used to be ignored silently.
 - `MergeStage::mergeInputTypes()` is no longer pure; it defaults to no slot
   types, so a merge can declare only names. `MergeFilter` now implements
   `MergeStage`, and `AnyMessageFilter` has a new `mergeInputNames()`, which
