@@ -3,8 +3,8 @@
 //  - MessageFilter: the base stage interface
 //  - FilterGraph: compile-time chaining of stages
 //  - FilterRegistry + DslFilterGraph: runtime graphs described in the text DSL,
-//    with fan-out (a "tap"), fan-in (merges, with typed and named slots),
-//    several named outputs and several named inputs
+//    with fan-out (a "tap"), fan-in (merges, with typed slots) and several
+//    named outputs (named slots and inputs: see apps/namedPipeline)
 //  - validateDslGraph: every problem in a broken graph, located by line:column
 //  - JsonFilterGraph: the JSON format, which remains supported
 #include <filterGraph/core/filterGraph/DslFilterGraph.hpp>
@@ -25,12 +25,10 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <vector>
 
 using filterGraph::DslFilterGraph;
 using filterGraph::FilterGraph;
 using filterGraph::FilterRegistrar;
-using filterGraph::GraphInputs;
 using filterGraph::JsonFilterGraph;
 using filterGraph::MergeInputs;
 using filterGraph::MessageFilter;
@@ -176,26 +174,6 @@ public:
 
 static FilterRegistrar<ReportFilter> registerReport("Report");
 
-// A merge with two slots of the same type, where the order matters. The slot
-// types cannot tell them apart, so it names them: a group can then match them
-// by name, `(after: x, before: y) -> Compare`, in any order.
-class CompareFilter : public TypedMergeFilter<std::string, std::string, std::string>
-{
-public:
-    std::optional<std::string> merge(std::optional<std::string>&& before,
-                                     std::optional<std::string>&& after) override
-    {
-        return std::format("{} => {}", before.value_or("-"), after.value_or("-"));
-    }
-
-    std::vector<std::string> mergeInputNames() const override
-    {
-        return {"before", "after"};
-    }
-};
-
-static FilterRegistrar<CompareFilter> registerCompare("Compare");
-
 // Only needed by the JSON example: in the DSL, fan-out is built in.
 static const bool sRegisterFanout = [] {
     registerFanoutFilter<std::string>("Fanout");
@@ -263,19 +241,6 @@ int main()
         }
     }
 
-    // 3c) Named slots: Compare's two slots have the same type, so only their
-    //     names say which is which. The group lists them in the other order;
-    //     the merge still receives `before` first.
-    {
-        DslFilterGraph<std::string, int> pipeline(R"dsl(
-            in -> Uppercase -> upper
-            upper -> Reverse -> reversed
-            (after: reversed, before: upper) -> Compare -> compared -> Print(prefix="[named] ") -> out
-        )dsl");
-
-        pipeline.filter(std::string{"Hello, filterGraph!"});
-    }
-
     // 4) Several named outputs of different types, returned as GraphOutputs.
     {
         DslFilterGraph<std::string> analysis(R"dsl(
@@ -289,21 +254,6 @@ int main()
                                  *outputs->get<std::string>("upper"),
                                  *outputs->get<std::size_t>("length"),
                                  outputs->has("long") ? "present" : "dropped");
-    }
-
-    // 4b) Several named inputs, with declared types. push() feeds one input
-    //     and runs only the stages it reaches; the other input is empty.
-    {
-        DslFilterGraph<GraphInputs> routes(R"dsl(
-            in.greeting -> Uppercase -> out.shouted
-            in.name -> Reverse -> out.reversed
-        )dsl",
-                                           GraphInputs::of<std::string, std::string>("greeting", "name"));
-
-        auto outputs = routes.push("name", std::string{"filterGraph"});
-        std::cout << std::format("[inputs] shouted={} reversed={}\n",
-                                 outputs->has("shouted") ? "present" : "not fed",
-                                 *outputs->get<std::string>("reversed"));
     }
 
     // 5) Problems are reported before anything runs: all of them at once, each

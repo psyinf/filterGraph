@@ -1,6 +1,6 @@
 # filterGraph by example
 
-This walkthrough follows three runnable samples under [`apps/`](apps/), all of
+This walkthrough follows four runnable samples under [`apps/`](apps/), all of
 them small text pipelines:
 
 | Sections | Sample | Covers |
@@ -8,8 +8,9 @@ them small text pipelines:
 | 1–7 | [`textPipeline`](apps/textPipeline/main.cpp) | the core building blocks: a **compile-time** `FilterGraph`, **runtime graphs in the text DSL** (a tap, a merge, several named outputs, up-front diagnostics) and the same pipeline in the **JSON format** |
 | 8 | [`statefulPipeline`](apps/statefulPipeline/main.cpp) | stages that **carry state**: `finish()`, the `GraphContext`, a merge with per-instance state |
 | 9 | [`compositePipeline`](apps/compositePipeline/main.cpp) | **composition**: `JoinFilter`, a graph nested as a stage, a `Void` sink, in-band ticks |
+| 10 | [`namedPipeline`](apps/namedPipeline/main.cpp) | **names in the wiring**: named merge slots, several named graph inputs, and the checks both make possible |
 
-Start at the top: sections 8 and 9 assume the vocabulary of 1–7.
+Start at the top: sections 8–10 assume the vocabulary of 1–7.
 
 ## Core concept: a chain of stages
 
@@ -271,48 +272,8 @@ compiler; they are shortened here.)
 lambda, and `UniformMergeFilter<In, Out>` covers the other shape: any number of
 slots, all of the same type (N variants of one computation, combined).
 
-### Named slots
-
-Slot types cannot catch everything: when two slots have the *same* type,
-swapping them still passes validation. A merge can name its slots so that the
-group says which edge goes where:
-
-```cpp
-class CompareFilter : public TypedMergeFilter<std::string, std::string, std::string>
-{
-public:
-    std::optional<std::string> merge(std::optional<std::string>&& before,
-                                     std::optional<std::string>&& after) override
-    {
-        return std::format("{} => {}", before.value_or("-"), after.value_or("-"));
-    }
-
-    std::vector<std::string> mergeInputNames() const override
-    {
-        return {"before", "after"};
-    }
-};
-static FilterRegistrar<CompareFilter> registerCompare("Compare");
-```
-
-```cpp
-DslFilterGraph<std::string, int> pipeline(R"dsl(
-    in -> Uppercase -> upper
-    upper -> Reverse -> reversed
-    (after: reversed, before: upper) -> Compare -> compared -> Print(prefix="[named] ") -> out
-)dsl");
-
-pipeline.filter(std::string{"Hello, filterGraph!"});
-```
-
-```text
-[named] HELLO, FILTERGRAPH! => !HPARGRETLIF ,OLLEH
-```
-
-The group lists `after` first, but the slots are matched by name, so `merge()`
-still receives `before` first. A misspelled name, or a slot the group leaves
-out, is reported when the graph is built. A group without names still feeds
-`Compare` by position.
+When two slots have the *same* type, their types cannot tell them apart; a
+merge can then name its slots. Section 10 shows how.
 
 ## 5. Several named outputs
 
@@ -356,34 +317,7 @@ The graph's output type decides what shape is allowed:
 | `GraphOutputs` | one or more `-> out` / `-> out.<key>` | all outputs; `std::nullopt` only if all were dropped |
 | `Void` | no outputs, only `-> end` | `Void{}` |
 
-### Several named inputs
-
-The mirror image: a graph can read several named inputs, `in.<key>`, with
-`GraphInputs` as its input type. Each `push()` is one run that feeds a single
-input; the stages that only an unfed input reaches are skipped, exactly as if
-their path had dropped the message:
-
-```cpp
-DslFilterGraph<GraphInputs> routes(R"dsl(
-    in.greeting -> Uppercase -> out.shouted
-    in.name -> Reverse -> out.reversed
-)dsl",
-                                   GraphInputs::of<std::string, std::string>("greeting", "name"));
-
-auto outputs = routes.push("name", std::string{"filterGraph"});
-std::cout << std::format("[inputs] shouted={} reversed={}\n",
-                         outputs->has("shouted") ? "present" : "not fed",
-                         *outputs->get<std::string>("reversed"));
-```
-
-```text
-[inputs] shouted=not fed reversed=hparGretlif
-```
-
-`GraphInputs::of` declares the input types, so they are checked when the graph
-is built; it is optional, and without it each input takes the type of the
-first stage that reads it. To feed several inputs in one run, pass them
-together: `routes.filter(GraphInputs{}.set("greeting", a).set("name", b))`.
+The mirror image, a graph with several named *inputs*, is in section 10.
 
 ## 6. Checking a graph before it runs
 
@@ -824,6 +758,165 @@ DslFilterGraph<Event, std::string> graph("in -> Batch -> out");
 [batch] 1 line(s) left unflushed at the end of the stream
 ```
 
+## 10. Names in the wiring: merge slots and graph inputs
+
+Positions are enough while a merge's slots have different types and a graph
+has one input. The fourth sample,
+[`apps/namedPipeline/main.cpp`](apps/namedPipeline/main.cpp), covers the cases
+where they are not: a merge whose slots share a type, and a graph that
+consumes several kinds of message. Both get names, and the names are checked.
+
+### Named slots
+
+Slot types cannot catch everything: when two slots have the *same* type,
+swapping them still passes validation. A merge can name its slots so that the
+group says which edge goes where:
+
+```cpp
+class CompareFilter : public TypedMergeFilter<std::string, std::string, std::string>
+{
+public:
+    std::optional<std::string> merge(std::optional<std::string>&& before,
+                                     std::optional<std::string>&& after) override
+    {
+        return std::format("{} => {}", before.value_or("-"), after.value_or("-"));
+    }
+
+    std::vector<std::string> mergeInputNames() const override
+    {
+        return {"before", "after"};
+    }
+};
+static FilterRegistrar<CompareFilter> registerCompare("Compare");
+```
+
+```cpp
+DslFilterGraph<std::string, std::string> compare(R"dsl(
+    in -> Uppercase -> upper
+    upper -> Reverse -> reversed
+    (after: reversed, before: upper) -> Compare -> out
+)dsl");
+
+std::cout << "[slots] " << *compare.filter(std::string{"Hello, filterGraph!"}) << '\n';
+```
+
+```text
+[slots] HELLO, FILTERGRAPH! => !HPARGRETLIF ,OLLEH
+```
+
+The group lists `after` first, but the slots are matched by name, so `merge()`
+still receives `before` first. A group without names still feeds `Compare` by
+position.
+
+The names are checked when the graph is built. Misspell one and both
+consequences are reported: the unknown name, and the slot now left unfed:
+
+```text
+[slot check] 3:36: 'Compare' has no slot named 'befor' — did you mean 'before'? (its slots: before, after)
+[slot check] 3:36: the fan-in group does not feed slot 'before' of 'Compare'
+```
+
+### Several named inputs
+
+The mirror image of section 5: a graph can read several named inputs,
+`in.<key>`, with `GraphInputs` as its input type. Each `push()` is one run that
+feeds a single input; the stages that only an unfed input reaches are skipped,
+exactly as if their path had dropped the message. `filter()` takes a
+`GraphInputs` and feeds several inputs in the same run:
+
+```cpp
+DslFilterGraph<GraphInputs> routes(R"dsl(
+    in.greeting -> Uppercase -> out.shouted
+    in.name -> Reverse -> out.reversed
+)dsl",
+                                   GraphInputs::of<std::string, std::string>("greeting", "name"));
+
+auto pushed = routes.push("name", std::string{"filterGraph"});
+auto both   = routes.filter(GraphInputs{}.set("greeting", std::string{"hi"}).set("name", std::string{"filterGraph"}));
+```
+
+```text
+[push]   shouted=not fed reversed=hparGretlif
+[filter] shouted=HI reversed=hparGretlif
+```
+
+`GraphInputs::of` declares the input types. It is optional; without it, each
+input takes the type of the first stage that reads it. With it, the graph is
+checked against the declaration when it is built, so a misspelled `in.<key>`
+shows up twice:
+
+```text
+[input check] 1:1: input 'name' is declared but the graph never reads 'in.name'
+[input check] 2:1: the graph reads 'in.nmae', but no input 'nmae' is declared
+```
+
+What is fed is checked when it arrives: an unknown key throws
+`std::out_of_range`, a value of the wrong type `std::invalid_argument`:
+
+```text
+[feed check] DslFilterGraph: the graph has no input named 'nmae'
+[feed check] DslFilterGraph: input 'name' expects 'class std::basic_string<char,...>' but received 'int'
+```
+
+### Both together
+
+Named inputs and named slots combine naturally: two inputs, each prepared by
+its own stage, meet in a merge that names its slots. This one is registered
+from a lambda; `registerTypedMergeFilter` takes the slot names, one per slot
+type, before the function:
+
+```cpp
+registerTypedMergeFilter<std::string, std::string, std::string>(
+    "Greet",
+    {"greeting", "name"},
+    [](std::optional<std::string>&& greeting, std::optional<std::string>&& name) -> std::optional<std::string> {
+        return std::format("{}, {}!", greeting.value_or("Hello"), name.value_or("stranger"));
+    });
+```
+
+```cpp
+DslFilterGraph<GraphInputs, std::string> greet(R"dsl(
+    in.greeting -> Uppercase -> shouted
+    in.name -> Capitalize -> proper
+    (name: proper, greeting: shouted) -> Greet -> out
+)dsl",
+                                               GraphInputs::of<std::string, std::string>("greeting", "name"));
+
+greet.push("name", std::string{"aDA"});
+greet.push("greeting", std::string{"good morning"});
+greet.filter(GraphInputs{}.set("greeting", std::string{"hi"}).set("name", std::string{"grace"}));
+```
+
+An input that is not fed in a run leaves a hole in its slot, which `Greet`
+fills with a default:
+
+```text
+[greet] Hello, Ada!
+[greet] GOOD MORNING, stranger!
+[greet] HI, Grace!
+```
+
+`dsl::toMermaid(greet.program())` labels the merge's edges with the slot names:
+
+```mermaid
+flowchart LR
+    s0["Uppercase"]
+    e0(["in.greeting"])
+    e1(["shouted"])
+    s1["Capitalize"]
+    e2(["in.name"])
+    e3(["proper"])
+    s2["Greet"]
+    e4(["out"])
+    e0 --> s0
+    s0 --> e1
+    e2 --> s1
+    s1 --> e3
+    e3 -->|"name"| s2
+    e1 -->|"greeting"| s2
+    s2 --> e4
+```
+
 ## Build & run these examples
 
 ```powershell
@@ -835,6 +928,7 @@ cmake --build --preset windows-msvc-release-user-mode
 ./out/build/windows-msvc-release-user-mode/apps/textPipeline/textPipeline
 ./out/build/windows-msvc-release-user-mode/apps/statefulPipeline/statefulPipeline
 ./out/build/windows-msvc-release-user-mode/apps/compositePipeline/compositePipeline
+./out/build/windows-msvc-release-user-mode/apps/namedPipeline/namedPipeline
 ```
 
 On Linux/macOS, use a matching preset such as `unixlike-gcc-release` or
@@ -851,9 +945,7 @@ The complete output of `textPipeline` (sections 1–7):
 [typed] HELLO, FILTERGRAPH! (19 chars)
 [typed check] 3:20: slot 1 of 'Report' expects 'class std::basic_string<char,...>' but edge 'length' carries 'unsigned __int64'
 [typed check] 3:20: slot 2 of 'Report' expects 'unsigned __int64' but edge 'upper' carries 'class std::basic_string<char,...>'
-[named] HELLO, FILTERGRAPH! => !HPARGRETLIF ,OLLEH
 [outputs] upper=HELLO, FILTERGRAPH! length=19 long=dropped
-[inputs] shouted=not fed reversed=hparGretlif
 [check] 1:7: unknown stage type 'Uppercas' — did you mean 'Uppercase'?
 [check] 2:7: could not construct 'MinLength': [json.exception.out_of_range.403] key 'minLength' not found
 [json tap] HELLO, FILTERGRAPH!
@@ -890,7 +982,7 @@ Of `statefulPipeline` (section 8):
 (15 words, not 12: in that last graph `Stamp` runs before `Collect`, so each
 line carries the session stamp as an extra word.)
 
-And of `compositePipeline` (section 9):
+Of `compositePipeline` (section 9):
 
 ```text
 [dsl]  COMPOSE ME | em esopmoc
@@ -908,3 +1000,23 @@ And of `compositePipeline` (section 9):
 [batch] third
 [batch] 1 line(s) left unflushed at the end of the stream
 ```
+
+And of `namedPipeline` (section 10):
+
+```text
+[slots] HELLO, FILTERGRAPH! => !HPARGRETLIF ,OLLEH
+[slot check] 3:36: 'Compare' has no slot named 'befor' — did you mean 'before'? (its slots: before, after)
+[slot check] 3:36: the fan-in group does not feed slot 'before' of 'Compare'
+[push]   shouted=not fed reversed=hparGretlif
+[filter] shouted=HI reversed=hparGretlif
+[feed check] DslFilterGraph: the graph has no input named 'nmae'
+[feed check] DslFilterGraph: input 'name' expects 'class std::basic_string<char,...>' but received 'int'
+[input check] 1:1: input 'name' is declared but the graph never reads 'in.name'
+[input check] 2:1: the graph reads 'in.nmae', but no input 'nmae' is declared
+[greet] Hello, Ada!
+[greet] GOOD MORNING, stranger!
+[greet] HI, Grace!
+```
+
+followed by the Mermaid flowchart shown in section 10. (The `[feed check]` type
+name is shortened here too.)

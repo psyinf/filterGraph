@@ -61,6 +61,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stage of an outer graph (with `finish()` and the context reaching into it), a
   `Void`-terminated sink graph, and the in-band tick message. EXAMPLE.md walks
   through both in sections 8 and 9.
+- **`apps/namedPipeline`** — a runnable example for names in a graph's wiring:
+  a merge whose same-typed slots are matched by name (`mergeInputNames()`), a
+  lambda merge with named slots (`registerTypedMergeFilter` with names), a graph
+  with several named inputs fed by `push()` and `filter(GraphInputs)`, the
+  build-time and feed-time checks the names enable, and `toMermaid` labelling a
+  merge's edges with its slot names. EXAMPLE.md section 10 walks through it; the
+  named-slot and named-input blocks move there from `apps/textPipeline`.
 - **Named merge slots** — a fan-in group can name the slots of a merge,
   `(raw: msg, checked: valid) -> Merge`, and is then matched by name, in any
   order: the merge receives its slots in the order it declares them. A merge
