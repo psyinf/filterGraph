@@ -18,61 +18,25 @@ Examples use the generic stages of the [README](README.md) (`Parse`,
 
 | # | Item | Impact | Compatibility | Workaround today |
 |---|------|--------|---------------|------------------|
-| 1 | [More examples for the newer features](#1-more-examples-for-the-newer-features) | **high**: several features have no runnable example | additive | read the tests |
-| 2 | [Named merge slots](#2-named-merge-slots) | medium | additive if done carefully | rely on group order |
-| 3 | [Several named graph inputs](#3-several-named-graph-inputs) | medium | additive (new graph shape) | `std::variant` input + select stages |
-| 4 | [Stage labels and typed access](#4-stage-labels-and-typed-access) | medium | additive (DSL syntax) | side registry filled by creator lambdas |
-| 5 | [Track which stage short-circuited](#5-track-which-stage-short-circuited) | medium | additive | tap the edge, or log in the stage |
-| 6 | [Config-aware `registerMergeFilter`](#6-config-aware-registermergefilter) | low | additive | subclass + `FilterRegistrar` creator |
-| 7 | [Injectable registry, duplicate detection](#7-injectable-registry-duplicate-detection) | low | mostly additive | unique names |
-| 8 | [Documentation: 0..n outputs, large messages](#8-documentation-0n-outputs-large-messages) | doc only | — | — |
-| 9 | [Known limitations to lift](#9-known-limitations-to-lift) | low–medium | additive | JSON config; read `GraphOutputs` carefully |
+| 1 | [Named merge slots](#1-named-merge-slots) | medium | additive if done carefully | rely on group order |
+| 2 | [Several named graph inputs](#2-several-named-graph-inputs) | medium | additive (new graph shape) | `std::variant` input + select stages |
+| 3 | [Stage labels and typed access](#3-stage-labels-and-typed-access) | medium | additive (DSL syntax) | side registry filled by creator lambdas |
+| 4 | [Track which stage short-circuited](#4-track-which-stage-short-circuited) | medium | additive | tap the edge, or log in the stage |
+| 5 | [Config-aware `registerMergeFilter`](#5-config-aware-registermergefilter) | low | additive | subclass + `FilterRegistrar` creator |
+| 6 | [Injectable registry, duplicate detection](#6-injectable-registry-duplicate-detection) | low | mostly additive | unique names |
+| 7 | [Documentation: 0..n outputs, large messages](#7-documentation-0n-outputs-large-messages) | doc only | — | — |
+| 8 | [Known limitations to lift](#8-known-limitations-to-lift) | low–medium | additive | JSON config; read `GraphOutputs` carefully |
 
-Two earlier items of the same list are done and therefore not repeated here:
+Items of the same list that are done, and therefore not repeated here:
 **type-checked merge inputs** (`TypedMergeFilter` / `UniformMergeFilter` /
-`registerTypedMergeFilter`) and the **end-of-stream hook**
-(`MessageFilter::finish()`). Both are described in the README.
+`registerTypedMergeFilter`), the **end-of-stream hook**
+(`MessageFilter::finish()`), both described in the README, and **examples for
+the newer features** — `apps/statefulPipeline` and `apps/compositePipeline`,
+walked through in [EXAMPLE.md](EXAMPLE.md) sections 8 and 9.
 
 ---
 
-## 1. More examples for the newer features
-
-**Today.** [`apps/textPipeline`](apps/textPipeline/main.cpp) and
-[EXAMPLE.md](EXAMPLE.md) cover the compile-time `FilterGraph`, registering
-stages, a DSL graph with a tap, fan-in with an untyped and a typed merge,
-several named outputs, `validateDslGraph` and the JSON format. Several features
-that shipped since have no runnable example: `GraphContext`,
-`MessageFilter::finish()`, a merge with per-instance state, `JoinFilter`, a
-nested graph used as a stage, a `Void` sink, and the in-band tick pattern that
-stands in for a `tick()` hook.
-
-**Gap.** Those are exactly the features that come up once stages hold state,
-and the hardest to get right from a reference description alone. Their only
-executable documentation today is the test suite
-([`GraphContextTests.cpp`](tests/FilterGraphTests/GraphContextTests.cpp),
-[`LifecycleTests.cpp`](tests/FilterGraphTests/LifecycleTests.cpp)), which reads
-as assertions rather than as a walkthrough.
-
-**Proposal.** One runnable app per theme, each in the style of `textPipeline`
-(numbered blocks, comments that explain the *why*), plus a matching EXAMPLE.md
-section per app:
-
-- `apps/statefulPipeline` — a stage that accumulates across messages, flushes
-  in `finish()` and publishes its result through the `GraphContext`; a merge
-  with per-instance state; a derived application context recovered with
-  `as<AppContext>()`.
-- `apps/compositePipeline` — `JoinFilter` from JSON next to the equivalent DSL
-  merge; a `DslFilterGraph` registered as a stage of an outer graph (showing
-  that `finish()` and the context propagate into it); a `Void`-terminated sink;
-  an in-band `Tick` alternative in a variant input type.
-
-**Compatibility.** Additive: new targets under `apps/`, no library change.
-
-**Workaround today.** The tests, plus the README sections
-[Graph context](README.md#graph-context) and
-[Ending a run](README.md#ending-a-run).
-
-## 2. Named merge slots
+## 1. Named merge slots
 
 **Today.** Slots are positional, in the order the DSL group lists them. A merge
 stage can only know which upstream a slot came from by convention. Since
@@ -114,7 +78,7 @@ is not needed.
 **Workaround today.** Rely on group order, and give same-typed slots distinct
 wrapper types so that the existing slot-type check can tell them apart.
 
-## 3. Several named graph inputs
+## 2. Several named graph inputs
 
 **Today.** A graph has exactly one input edge `in`, with one type. A graph that
 consumes several kinds of message needs a single `std::variant` input, and then
@@ -149,7 +113,7 @@ keeps the single `in` edge.
 **Workaround today.** A `std::variant` input plus one select stage per
 alternative, each dropping the alternatives it does not handle.
 
-## 4. Stage labels and typed access
+## 3. Stage labels and typed access
 
 **Today.** The owner of a `DslFilterGraph` cannot reach a stage instance. The
 DSL has no labels (`#` starts a comment), and the compiled plan is private.
@@ -179,7 +143,7 @@ auto& stats = graph.stage<SummarizeFilter>("stats"); // throws if unknown or the
 every instance it builds in a side registry, or have the stage publish what the
 owner needs through the `GraphContext`.
 
-## 5. Track which stage short-circuited
+## 4. Track which stage short-circuited
 
 **Today.** When a graph drops a message, neither `DslFilterGraph` nor
 `AnyFilterChain` tells the caller *which* stage returned `std::nullopt`.
@@ -200,7 +164,7 @@ so that variant needs an overload or an opt-in.
 **Workaround today.** Tap the suspect edge with a logging stage ending in `end`,
 or log inside the stage that decides to drop.
 
-## 6. Config-aware `registerMergeFilter`
+## 5. Config-aware `registerMergeFilter`
 
 **Today.** `registerMergeFilter<Out>(name, combiner)` ignores the DSL config and
 **copies one combiner into every instance**. A combiner lambda that captures a
@@ -221,15 +185,16 @@ void registerMergeFilter(const std::string& name,
                          std::function<typename MergeFilter<Out>::Combiner(const nlohmann::json& config)> factory);
 ```
 
-Plus a short EXAMPLE.md section on "stateful merges: subclass +
-`FilterRegistrar`" (see item 1), and a note in the README on the copy semantics
-of the existing overload.
+[EXAMPLE.md](EXAMPLE.md) section 8 now shows the subclass + `FilterRegistrar`
+pattern and the shared-combiner semantics; what is still missing is the
+overload above, and a note in the README on the copy semantics of the existing
+one.
 
 **Compatibility.** Additive overload.
 
 **Workaround today.** Subclass and register with a creator lambda.
 
-## 7. Injectable registry, duplicate detection
+## 6. Injectable registry, duplicate detection
 
 **Today.** `FilterRegistry::instance()` is a process-wide singleton, and
 `registerFilter` **silently overwrites** an existing name.
@@ -258,7 +223,7 @@ Ship it behind a transition: warn first, or add
 **Workaround today.** Keep names unique, and register test fakes under their own
 names.
 
-## 8. Documentation: 0..n outputs, large messages
+## 7. Documentation: 0..n outputs, large messages
 
 No API change. These points belong in the README / EXAMPLE.md, because they come
 up as soon as stages carry state:
@@ -275,7 +240,7 @@ up as soon as stages carry state:
   its members persists across messages. Say explicitly that this is supported
   and intended, and that each graph construction creates fresh instances.
 
-## 9. Known limitations to lift
+## 8. Known limitations to lift
 
 The [current limitations](README.md#current-limitations) the README lists, as
 work items:

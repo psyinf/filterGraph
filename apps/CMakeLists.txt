@@ -1,1 +1,3 @@
 add_subdirectory(textPipeline)
+add_subdirectory(statefulPipeline)
+add_subdirectory(compositePipeline)
