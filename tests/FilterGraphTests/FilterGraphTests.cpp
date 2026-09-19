@@ -945,6 +945,11 @@ std::string describeProgram(const dsl::GraphProgram& program)
         text += std::format("output {} key={} index={} @{}:{}\n", output.edge, output.key.value_or("<none>"),
                             output.index, output.loc.line, output.loc.column);
     }
+    for (const auto& input : program.inputs)
+    {
+        text += std::format("input {} key={} @{}:{}\n", input.edge, input.key.value_or("<none>"), input.loc.line,
+                            input.loc.column);
+    }
     text += std::format("deadEnds={}\n", program.deadEnds.size());
     text += dsl::formatDiagnostics(program.diagnostics);
     return text;
@@ -1002,6 +1007,8 @@ TEST_CASE("Both parsers report the same located syntax errors", "[GraphDslErrors
         {"(a b: c) -> RunDouble -> out", "1:1: a fan-in group names either all of its slots or none, e.g. '(a: x, b: y)'"},
         {"(a: x, a: y) -> RunDouble -> out", "1:1: slot 'a' is named twice in the fan-in group"},
         {"in -> RunDouble: -> out", "1:16: expected '->' but found ':'"},
+        {"in -> RunDouble -> q.x -> RunDouble -> out", "1:20: only 'in' and 'out' take a '.<key>', not 'q.x'"},
+        {"in. -> RunDouble -> out", "1:5: expected a key name after '.' but found '->'"},
     };
 
     for (const auto& [source, expected] : cases)

@@ -37,8 +37,8 @@
 //   msg           -> Store            -> end
 //
 // - even positions are edges (identifiers) or the reserved boundary nodes
-//   `in` (graph input), `out` / `out.<key>` (results), `end` (dead-end: the
-//   value is discarded);
+//   `in` / `in.<key>` (the graph input, or one of several named inputs),
+//   `out` / `out.<key>` (results), `end` (dead-end: the value is discarded);
 // - odd positions are stage applications: a REGISTERED filter/merge name,
 //   optionally with config args `Name(k=v, k2="s", k3=true)`;
 // - fan-out = reuse an edge name as a source in several statements;
@@ -79,6 +79,15 @@ struct StageNode
     SourceLoc                  loc;
 };
 
+// One graph input the program reads: `in`, or a named `in.<key>`, located at
+// its first use.
+struct InputBinding
+{
+    std::string                edge; // "in" or "in.<key>"
+    std::optional<std::string> key;  // name from `in.<key>`
+    SourceLoc                  loc;
+};
+
 // One `-> out` (or `-> out.<key>`), in DSL order (index is positional).
 struct OutputBinding
 {
@@ -91,6 +100,7 @@ struct OutputBinding
 struct GraphProgram
 {
     std::vector<StageNode>      stages;
+    std::vector<InputBinding>   inputs;   // distinct graph inputs, in order of first use
     std::vector<OutputBinding>  outputs;
     std::vector<std::string>    deadEnds; // edges routed to `end`
     std::vector<TextDiagnostic> diagnostics;
@@ -134,6 +144,12 @@ inline void sortDiagnostics(std::vector<TextDiagnostic>& diagnostics)
 inline bool isReserved(std::string_view name)
 {
     return name == "in" || name == "out" || name == "end";
+}
+
+// The edge a graph input arrives on: `in`, or `in.<key>` for a named input.
+inline bool isInputEdge(std::string_view edge)
+{
+    return edge == "in" || edge.starts_with("in.");
 }
 
 // ------------------------- shared lexical helpers ------------------------
@@ -307,7 +323,7 @@ struct Term
 
     Kind                       kind = Kind::Edge;
     std::string                name;    // edge/stage/boundary name
-    std::optional<std::string> key;     // for `out.<key>`
+    std::optional<std::string> key;     // for `in.<key>` / `out.<key>`
     nlohmann::json             config;  // for Stage
     std::vector<std::string>   edges;   // for Group
     std::vector<std::string>   slotNames; // for Group: per edge, from `name: edge`; "" when unnamed
@@ -407,6 +423,15 @@ inline void buildStatement(std::vector<Term>&           terms,
                 return;
             }
         }
+
+        // Only the graph's inputs and outputs are keyed.
+        if (terms[i].key && terms[i].name != "in" && terms[i].name != "out")
+        {
+            diags.push_back({terms[i].loc,
+                             std::format("only 'in' and 'out' take a '.<key>', not '{}.{}'", terms[i].name,
+                                         *terms[i].key)});
+            return;
+        }
     }
 
     // Emit one stage node per stage term, wiring input(s) from the previous
@@ -428,6 +453,17 @@ inline void buildStatement(std::vector<Term>&           terms,
             {
                 node.slotNames = source.slotNames;
             }
+        }
+        else if (source.name == "in")
+        {
+            const std::string edge = source.key ? "in." + *source.key : std::string{"in"};
+            const bool        seen = std::any_of(program.inputs.begin(), program.inputs.end(),
+                                                 [&](const InputBinding& input) { return input.edge == edge; });
+            if (!seen)
+            {
+                program.inputs.push_back({edge, source.key, source.loc});
+            }
+            node.inputs = {edge};
         }
         else
         {
@@ -492,7 +528,7 @@ inline void validateProgram(GraphProgram& program)
         {
             consumed.insert(input);
             const bool produced = producerCount.find(input) != producerCount.end();
-            if (input != "in" && !produced)
+            if (!isInputEdge(input) && !produced)
             {
                 program.diagnostics.push_back(
                     {stage.loc, std::format("edge '{}' is used but never produced", input)});
@@ -862,7 +898,7 @@ inline bool parseStatementLine(std::string_view             lineText,
         term.loc  = locOf(sc.position());
         term.name = captureIdent();
 
-        // Optional `.key` (only meaningful for `out`).
+        // Optional `.key` (only meaningful for `in` and `out`).
         skipBlank();
         if (sc.branch(ld::lit_c<'.'>))
         {

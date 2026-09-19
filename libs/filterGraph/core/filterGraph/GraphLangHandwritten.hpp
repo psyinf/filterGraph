@@ -349,7 +349,7 @@ private:
         term.name = peek().text;
         next();
 
-        // Optional `.key` (currently only meaningful for `out`).
+        // Optional `.key` (only meaningful for `in` and `out`).
         if (peek().kind == TokenKind::Dot)
         {
             next();
