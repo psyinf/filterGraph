@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 // DEPRECATED: the original hand-written tokenizer and recursive-descent parser
@@ -32,6 +33,7 @@ enum class TokenKind
     Comma,     // ,
     Equals,    // =
     Dot,       // .
+    Colon,     // :
     Invalid,   // an unexpected character or an unterminated string
     Newline,
     EndOfInput
@@ -83,13 +85,14 @@ public:
                 tokens.push_back(take(TokenKind::Arrow, 2));
                 continue;
             }
-            if (c == '(' || c == ')' || c == ',' || c == '=' || c == '.')
+            if (c == '(' || c == ')' || c == ',' || c == '=' || c == '.' || c == ':')
             {
                 const TokenKind kind = c == '(' ? TokenKind::LParen
                                      : c == ')' ? TokenKind::RParen
                                      : c == ',' ? TokenKind::Comma
                                      : c == '=' ? TokenKind::Equals
-                                                : TokenKind::Dot;
+                                     : c == '.' ? TokenKind::Dot
+                                                : TokenKind::Colon;
                 tokens.push_back(take(kind, 1));
                 continue;
             }
@@ -321,8 +324,21 @@ private:
                 unexpected("expected an edge name in group");
                 return term;
             }
-            term.edges.push_back(peek().text);
-            next();
+            // `edge`, or `name: edge` for a named slot.
+            std::string edge = next().text;
+            std::string slot;
+            if (peek().kind == TokenKind::Colon)
+            {
+                next();
+                if (peek().kind != TokenKind::Identifier)
+                {
+                    unexpected(std::format("expected an edge name after '{}:'", edge));
+                    return term;
+                }
+                slot = std::exchange(edge, next().text);
+            }
+            term.edges.push_back(std::move(edge));
+            term.slotNames.push_back(std::move(slot));
         }
     }
 

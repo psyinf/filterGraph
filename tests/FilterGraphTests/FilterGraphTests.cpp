@@ -933,6 +933,11 @@ std::string describeProgram(const dsl::GraphProgram& program)
         {
             text += input + ',';
         }
+        text += " slots=";
+        for (const auto& slot : stage.slotNames)
+        {
+            text += slot + ',';
+        }
         text += std::format(" output={} fanIn={}\n", stage.output.value_or("<end>"), stage.fanIn);
     }
     for (const auto& output : program.outputs)
@@ -992,6 +997,11 @@ TEST_CASE("Both parsers report the same located syntax errors", "[GraphDslErrors
         {"in -> RunDouble -> -", "1:20: unexpected character '-'"},
         {"in -> RunDouble -> \xC3\xA9", "1:20: unexpected byte 0xC3"},
         {"in -> RunDouble RunDouble -> out\r\n", "1:17: expected '->' but found 'RunDouble'"},
+        {"(a: -> RunDouble -> out", "1:5: expected an edge name after 'a:' but found '->'"},
+        {"(a: 3) -> RunDouble -> out", "1:5: expected an edge name after 'a:' but found '3'"},
+        {"(a b: c) -> RunDouble -> out", "1:1: a fan-in group names either all of its slots or none, e.g. '(a: x, b: y)'"},
+        {"(a: x, a: y) -> RunDouble -> out", "1:1: slot 'a' is named twice in the fan-in group"},
+        {"in -> RunDouble: -> out", "1:16: expected '->' but found ':'"},
     };
 
     for (const auto& [source, expected] : cases)

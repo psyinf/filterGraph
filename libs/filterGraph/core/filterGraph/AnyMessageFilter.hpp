@@ -6,8 +6,10 @@
 #include <any>
 #include <memory>
 #include <optional>
+#include <string>
 #include <typeindex>
 #include <utility>
+#include <vector>
 
 namespace filterGraph {
 
@@ -39,6 +41,13 @@ public:
     // The slot types of a merge stage (see MergeStage); empty for an untyped
     // merge and for every stage that is not a merge.
     virtual MergeSlotTypes mergeInputTypes() const
+    {
+        return {};
+    }
+
+    // The slot names of a merge stage (see MergeStage); empty for a merge with
+    // positional slots and for every stage that is not a merge.
+    virtual std::vector<std::string> mergeInputNames() const
     {
         return {};
     }
@@ -91,6 +100,15 @@ public:
         if (const auto* merge = dynamic_cast<const MergeStage*>(mFilter.get()))
         {
             return merge->mergeInputTypes();
+        }
+        return {};
+    }
+
+    std::vector<std::string> mergeInputNames() const override
+    {
+        if (const auto* merge = dynamic_cast<const MergeStage*>(mFilter.get()))
+        {
+            return merge->mergeInputNames();
         }
         return {};
     }

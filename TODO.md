@@ -18,67 +18,26 @@ Examples use the generic stages of the [README](README.md) (`Parse`,
 
 | # | Item | Impact | Compatibility | Workaround today |
 |---|------|--------|---------------|------------------|
-| 1 | [Named merge slots](#1-named-merge-slots) | medium | additive if done carefully | rely on group order |
-| 2 | [Several named graph inputs](#2-several-named-graph-inputs) | medium | additive (new graph shape) | `std::variant` input + select stages |
-| 3 | [Stage labels and typed access](#3-stage-labels-and-typed-access) | medium | additive (DSL syntax) | side registry filled by creator lambdas |
-| 4 | [Track which stage short-circuited](#4-track-which-stage-short-circuited) | medium | additive | tap the edge, or log in the stage |
-| 5 | [Config-aware `registerMergeFilter`](#5-config-aware-registermergefilter) | low | additive | subclass + `FilterRegistrar` creator |
-| 6 | [Injectable registry, duplicate detection](#6-injectable-registry-duplicate-detection) | low | mostly additive | unique names |
-| 7 | [Documentation: 0..n outputs, large messages](#7-documentation-0n-outputs-large-messages) | doc only | — | — |
-| 8 | [Known limitations to lift](#8-known-limitations-to-lift) | low–medium | additive | JSON config; read `GraphOutputs` carefully |
+| 1 | [Several named graph inputs](#1-several-named-graph-inputs) | medium | additive (new graph shape) | `std::variant` input + select stages |
+| 2 | [Stage labels and typed access](#2-stage-labels-and-typed-access) | medium | additive (DSL syntax) | side registry filled by creator lambdas |
+| 3 | [Track which stage short-circuited](#3-track-which-stage-short-circuited) | medium | additive | tap the edge, or log in the stage |
+| 4 | [Config-aware `registerMergeFilter`](#4-config-aware-registermergefilter) | low | additive | subclass + `FilterRegistrar` creator |
+| 5 | [Injectable registry, duplicate detection](#5-injectable-registry-duplicate-detection) | low | mostly additive | unique names |
+| 6 | [Documentation: 0..n outputs, large messages](#6-documentation-0n-outputs-large-messages) | doc only | — | — |
+| 7 | [Known limitations to lift](#7-known-limitations-to-lift) | low–medium | additive | JSON config; read `GraphOutputs` carefully |
 
 Items of the same list that are done, and therefore not repeated here:
 **type-checked merge inputs** (`TypedMergeFilter` / `UniformMergeFilter` /
-`registerTypedMergeFilter`), the **end-of-stream hook**
-(`MessageFilter::finish()`), both described in the README, and **examples for
+`registerTypedMergeFilter`), **named merge slots**
+(`(raw: msg, checked: valid) -> Merge`, `MergeStage::mergeInputNames()`), the
+**end-of-stream hook** (`MessageFilter::finish()`), all described in the
+README, and **examples for
 the newer features** — `apps/statefulPipeline` and `apps/compositePipeline`,
 walked through in [EXAMPLE.md](EXAMPLE.md) sections 8 and 9.
 
 ---
 
-## 1. Named merge slots
-
-**Today.** Slots are positional, in the order the DSL group lists them. A merge
-stage can only know which upstream a slot came from by convention. Since
-type-checked merges shipped, a mis-*typed* slot is caught when the graph is
-built — but two slots of the *same* type in the wrong order still pass
-validation and then run silently wrong.
-
-**Proposal.** Optional slot names in the group, checked against the names the
-stage declares:
-
-```text
-(raw: msg, checked: valid) -> Summarize -> out.stats
-```
-
-```cpp
-// empty = positional, today's behaviour
-virtual std::vector<std::string> mergeInputNames() const { return {}; }
-```
-
-Behaviour:
-
-- **Stage declares names, group uses names:** slots are matched by name, so the
-  order in the group no longer matters. Unknown or missing names produce
-  diagnostics.
-- **Stage declares names, group is positional:** allowed, matched by position
-  (keeps today's graphs valid).
-- **Stage declares nothing:** names in the group are an error (*'Summarize' has
-  no named slots*).
-
-Together with the slot types a typed merge already declares, this gives every
-slot a name *and* a type, which also makes `dsl::toMermaid` output
-self-explanatory.
-
-**Compatibility.** Keep `MergeInputs` a `std::vector<std::any>` and reorder the
-values into declared order before calling the stage, so stage code does not
-change. Making `MergeInputs` a struct with names would be a breaking change and
-is not needed.
-
-**Workaround today.** Rely on group order, and give same-typed slots distinct
-wrapper types so that the existing slot-type check can tell them apart.
-
-## 2. Several named graph inputs
+## 1. Several named graph inputs
 
 **Today.** A graph has exactly one input edge `in`, with one type. A graph that
 consumes several kinds of message needs a single `std::variant` input, and then
@@ -113,7 +72,7 @@ keeps the single `in` edge.
 **Workaround today.** A `std::variant` input plus one select stage per
 alternative, each dropping the alternatives it does not handle.
 
-## 3. Stage labels and typed access
+## 2. Stage labels and typed access
 
 **Today.** The owner of a `DslFilterGraph` cannot reach a stage instance. The
 DSL has no labels (`#` starts a comment), and the compiled plan is private.
@@ -143,7 +102,7 @@ auto& stats = graph.stage<SummarizeFilter>("stats"); // throws if unknown or the
 every instance it builds in a side registry, or have the stage publish what the
 owner needs through the `GraphContext`.
 
-## 4. Track which stage short-circuited
+## 3. Track which stage short-circuited
 
 **Today.** When a graph drops a message, neither `DslFilterGraph` nor
 `AnyFilterChain` tells the caller *which* stage returned `std::nullopt`.
@@ -164,7 +123,7 @@ so that variant needs an overload or an opt-in.
 **Workaround today.** Tap the suspect edge with a logging stage ending in `end`,
 or log inside the stage that decides to drop.
 
-## 5. Config-aware `registerMergeFilter`
+## 4. Config-aware `registerMergeFilter`
 
 **Today.** `registerMergeFilter<Out>(name, combiner)` ignores the DSL config and
 **copies one combiner into every instance**. A combiner lambda that captures a
@@ -194,7 +153,7 @@ one.
 
 **Workaround today.** Subclass and register with a creator lambda.
 
-## 6. Injectable registry, duplicate detection
+## 5. Injectable registry, duplicate detection
 
 **Today.** `FilterRegistry::instance()` is a process-wide singleton, and
 `registerFilter` **silently overwrites** an existing name.
@@ -223,7 +182,7 @@ Ship it behind a transition: warn first, or add
 **Workaround today.** Keep names unique, and register test fakes under their own
 names.
 
-## 7. Documentation: 0..n outputs, large messages
+## 6. Documentation: 0..n outputs, large messages
 
 No API change. These points belong in the README / EXAMPLE.md, because they come
 up as soon as stages carry state:
@@ -240,7 +199,7 @@ up as soon as stages carry state:
   its members persists across messages. Say explicitly that this is supported
   and intended, and that each graph construction creates fresh instances.
 
-## 8. Known limitations to lift
+## 7. Known limitations to lift
 
 The [current limitations](README.md#current-limitations) the README lists, as
 work items:

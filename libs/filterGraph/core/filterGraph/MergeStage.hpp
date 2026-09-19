@@ -1,6 +1,7 @@
 #pragma once
 
 #include <any>
+#include <string>
 #include <typeindex>
 #include <vector>
 
@@ -29,14 +30,28 @@ struct MergeSlotTypes
 };
 
 // Implemented by merge stages (MessageFilter<MergeInputs, Out>) that declare
-// their slot types. TypedMergeFilter and UniformMergeFilter implement it; a
-// hand-written merge stage may derive from it too.
+// their slots: their types, their names, or both. TypedMergeFilter,
+// UniformMergeFilter and MergeFilter implement it; a hand-written merge stage
+// may derive from it too.
 class MergeStage
 {
 public:
     virtual ~MergeStage() = default;
 
-    virtual MergeSlotTypes mergeInputTypes() const = 0;
+    // The slot types; empty (the default) for an untyped merge.
+    virtual MergeSlotTypes mergeInputTypes() const
+    {
+        return {};
+    }
+
+    // The slot names, in slot order; empty (the default) for a merge whose
+    // slots are positional. A merge that names its slots has exactly that many,
+    // and a DSL group may then match them by name, `(raw: msg, checked: valid)`,
+    // in any order: the slots are handed over in the order declared here.
+    virtual std::vector<std::string> mergeInputNames() const
+    {
+        return {};
+    }
 };
 
 } // namespace filterGraph
