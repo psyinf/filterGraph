@@ -24,14 +24,15 @@ Examples use the generic stages of the [README](README.md) (`Parse`,
 | 4 | [Injectable registry, duplicate detection](#4-injectable-registry-duplicate-detection) | low | mostly additive | unique names |
 | 5 | [Documentation: 0..n outputs, large messages](#5-documentation-0n-outputs-large-messages) | doc only | — | — |
 | 6 | [Known limitations to lift](#6-known-limitations-to-lift) | low–medium | additive | JSON config; read `GraphOutputs` carefully |
+| 7 | [`dsl::toAscii`: console rendering](#7-dsltoascii-console-rendering) | low | additive | `toDot` into `graph-easy --as=boxart` |
 
 Items of the same list that are done, and therefore not repeated here:
 **type-checked merge inputs** (`TypedMergeFilter` / `UniformMergeFilter` /
 `registerTypedMergeFilter`), **named merge slots**
 (`(raw: msg, checked: valid) -> Merge`, `MergeStage::mergeInputNames()`),
 **several named graph inputs** (`in.<key>`, `GraphInputs`), the
-**end-of-stream hook** (`MessageFilter::finish()`), all described in the
-README, and **examples for
+**end-of-stream hook** (`MessageFilter::finish()`), the **Graphviz export**
+(`dsl::toDot`), all described in the README, and **examples for
 the newer features** — `apps/statefulPipeline` and `apps/compositePipeline`,
 walked through in [EXAMPLE.md](EXAMPLE.md) sections 8 and 9.
 
@@ -178,3 +179,38 @@ work items:
   behind `out.<key>` are checked when they are read (`get<T>` throws
   `std::bad_any_cast`), not when the graph is built. Checking them up front
   needs a way to declare the expected type per key.
+
+## 7. `dsl::toAscii`: console rendering
+
+**Today.** Printing a graph without an external tool is not possible; neither
+diagnostics nor a debugging session can show the graph's shape as text.
+
+**Proposal.** A native text rendering, in two steps:
+
+1. **Text listing** (cheap, do first): one node per line with branch
+   characters in the style of `git log --graph`, merges showing their slots.
+   Readable for any DAG and easy to snapshot-test.
+
+   ```text
+   in
+   └─► Parse ──► msg
+       ├─► Validate ──► valid
+       └─┐
+   (msg, valid) ─► Summarize ──► out.stats
+   ```
+
+2. **2D box layout** (only if the listing is not enough): a layered layout —
+   columns by longest path from `in`, node order within a column chosen to
+   reduce crossings, edges routed on a character grid with box-drawing
+   characters (and a pure-ASCII fallback). Linear chains are trivial; merges,
+   splits and crossing edges are where the effort is.
+
+```cpp
+std::string toAscii(const GraphProgram& program);
+```
+
+**Compatibility.** Additive.
+
+**Workaround today.** `dsl::toDot` piped into `graph-easy --as=boxart`
+(Graph::Easy), or `dsl::toMermaid` into `mermaid-ascii`, which supports only a
+subset of Mermaid.

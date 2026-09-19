@@ -273,6 +273,19 @@ TEST_CASE("Inconsistent slot declarations of a stage are reported", "[NamedSlots
     REQUIRE(diagnostics[0].message == "stage 'SlotBroken' declares 3 slot names for 2 slot types");
 }
 
+TEST_CASE("toDot labels a named group's links with the slot names", "[NamedSlots]")
+{
+    const auto program = dsl::parseGraphProgram("in -> SlotPlusOne -> small\n"
+                                                "in -> SlotTimesTen -> large\n"
+                                                "(bonus: small, base: large) -> SlotDifference -> out\n");
+    REQUIRE(program.ok());
+
+    const std::string dot = dsl::toDot(program);
+    REQUIRE(dot.find("-> s2 [label=\"bonus\"];") != std::string::npos);
+    REQUIRE(dot.find("-> s2 [label=\"base\"];") != std::string::npos);
+    REQUIRE(dot.find("e0 -> s0;") != std::string::npos);
+}
+
 TEST_CASE("The parsed program and toMermaid carry the slot names", "[NamedSlots]")
 {
     const auto program = dsl::parseGraphProgram("in -> SlotPlusOne -> small\n"
