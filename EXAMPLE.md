@@ -8,7 +8,7 @@ them small text pipelines:
 | 1–7 | [`textPipeline`](apps/textPipeline/main.cpp) | the core building blocks: a **compile-time** `FilterGraph`, **runtime graphs in the text DSL** (a tap, a merge, several named outputs, up-front diagnostics) and the same pipeline in the **JSON format** |
 | 8 | [`statefulPipeline`](apps/statefulPipeline/main.cpp) | stages that **carry state**: `finish()`, the `GraphContext`, a merge with per-instance state |
 | 9 | [`compositePipeline`](apps/compositePipeline/main.cpp) | **composition**: `JoinFilter`, a graph nested as a stage, a `Void` sink, in-band ticks |
-| 10 | [`namedPipeline`](apps/namedPipeline/main.cpp) | **names in the wiring**: named merge slots, several named graph inputs, and the checks both make possible |
+| 10 | [`namedPipeline`](apps/namedPipeline/main.cpp) | **names in the wiring**: named merge slots, several named graph inputs (also read directly by a merge), and the checks both make possible |
 
 Start at the top: sections 8–10 assume the vocabulary of 1–7.
 
@@ -933,6 +933,41 @@ flowchart LR
     s2 --> e4
 ```
 
+### A merge reading an input directly
+
+Only the name needs preparing; the greeting can go into `Greet` as it arrives.
+A group reads `in.<key>` (or plain `in`) like any other edge, so no stage has
+to copy the input onto an edge of its own first:
+
+```cpp
+DslFilterGraph<GraphInputs, std::string> greet(R"dsl(
+    in.name -> Capitalize -> proper
+    (greeting: in.greeting, name: proper) -> Greet -> out
+)dsl");
+
+greet.push("greeting", std::string{"Welcome"});
+greet.filter(GraphInputs{}.set("greeting", std::string{"Welcome"}).set("name", std::string{"lINUS"}));
+std::cout << dsl::toAscii(greet.program());
+```
+
+Nothing is declared here, so `in.greeting` takes the type of the `greeting`
+slot it feeds. As before, the unfed input is a hole:
+
+```text
+[direct] Welcome, stranger!
+[direct] Welcome, Linus!
+
+in.name
+`-> Capitalize -> proper
+    `-> Greet (merge, see below)
+
+in.greeting
+`-> Greet (merge, see below)
+
+(greeting: in.greeting, name: proper)
+`-> Greet -> out
+```
+
 ## Build & run these examples
 
 ```powershell
@@ -1034,5 +1069,5 @@ And of `namedPipeline` (section 10):
 [greet] HI, Grace!
 ```
 
-followed by the Mermaid flowchart shown in section 10. (The `[feed check]` type
-name is shortened here too.)
+followed by the Mermaid flowchart and the `[direct]` block shown in section 10.
+(The `[feed check]` type name is shortened here too.)

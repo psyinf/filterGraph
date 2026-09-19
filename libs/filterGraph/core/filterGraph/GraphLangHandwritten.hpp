@@ -324,8 +324,9 @@ private:
                 unexpected("expected an edge name in group");
                 return term;
             }
-            // `edge`, or `name: edge` for a named slot.
-            std::string edge = next().text;
+            // `edge`, or `name: edge` for a named slot; the edge may be `in.<key>`.
+            SourceLoc   edgeLoc = peek().loc;
+            std::string edge    = next().text;
             std::string slot;
             if (peek().kind == TokenKind::Colon)
             {
@@ -335,9 +336,23 @@ private:
                     unexpected(std::format("expected an edge name after '{}:'", edge));
                     return term;
                 }
-                slot = std::exchange(edge, next().text);
+                edgeLoc = peek().loc;
+                slot    = std::exchange(edge, next().text);
+            }
+            std::optional<std::string> key;
+            if (peek().kind == TokenKind::Dot)
+            {
+                next();
+                if (peek().kind != TokenKind::Identifier)
+                {
+                    unexpected("expected a key name after '.'");
+                    return term;
+                }
+                key = next().text;
             }
             term.edges.push_back(std::move(edge));
+            term.edgeKeys.push_back(std::move(key));
+            term.edgeLocs.push_back(edgeLoc);
             term.slotNames.push_back(std::move(slot));
         }
     }
