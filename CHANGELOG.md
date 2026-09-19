@@ -65,8 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a merge whose same-typed slots are matched by name (`mergeInputNames()`), a
   lambda merge with named slots (`registerTypedMergeFilter` with names), a graph
   with several named inputs fed by `push()` and `filter(GraphInputs)`, the
-  build-time and feed-time checks the names enable, and `toMermaid` labelling a
-  merge's edges with its slot names. EXAMPLE.md section 10 walks through it; the
+  build-time and feed-time checks the names enable, `toMermaid` labelling a
+  merge's edges with its slot names, and a merge reading a named input directly.
+  EXAMPLE.md section 10 walks through it; the
   named-slot and named-input blocks move there from `apps/textPipeline`.
 - **Named merge slots** — a fan-in group can name the slots of a merge,
   `(raw: msg, checked: valid) -> Merge`, and is then matched by name, in any
@@ -90,7 +91,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overloads, and they are checked when the graph is built; an undeclared input
   takes the type of its first reader. Feeding an unknown key throws
   `std::out_of_range`, a value of the wrong type `std::invalid_argument`.
-  `dsl::GraphProgram::inputs` lists the inputs a program reads.
+  `dsl::GraphProgram::inputs` lists the inputs a program reads. A fan-in group
+  can read `in` and `in.<key>` directly, positional or named
+  (`(plots: plots, ticks: in.ticks) -> Tracker`), with no pass-through stage
+  to copy the input onto an edge first. An undeclared input read only by a
+  group takes the type of its slot.
 - **`TODO.md`** — the planned work, with what the library does today, the gap,
   an API sketch and the workaround for each item; the README roadmap summarizes
   it.

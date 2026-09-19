@@ -963,6 +963,20 @@ TEST_CASE("toAscii shows arguments, dead ends and outputs, in plain or Unicode c
             "\xE2\x94\x94\xE2\x94\x80\xE2\x96\xBA RunDouble \xE2\x94\x80\xE2\x96\xBA out\n");
 }
 
+TEST_CASE("toAscii roots a tree at a graph input read only by a group", "[GraphDsl]")
+{
+    const auto program = dsl::parseGraphProgram("(in.orders, in.quotes) -> X -> out\n");
+
+    REQUIRE(dsl::toAscii(program) == "in.orders\n"
+                                     "`-> X (merge, see below)\n"
+                                     "\n"
+                                     "in.quotes\n"
+                                     "`-> X (merge, see below)\n"
+                                     "\n"
+                                     "(in.orders, in.quotes)\n"
+                                     "`-> X -> out\n");
+}
+
 TEST_CASE("toAscii prints every stage of an invalid program once", "[GraphDsl]")
 {
     auto program = dsl::parseGraphProgram("a -> X -> b\nb -> Y -> a\n");
@@ -1078,6 +1092,13 @@ TEST_CASE("Both parsers report the same located syntax errors", "[GraphDslErrors
         {"in -> RunDouble: -> out", "1:16: expected '->' but found ':'"},
         {"in -> RunDouble -> q.x -> RunDouble -> out", "1:20: only 'in' and 'out' take a '.<key>', not 'q.x'"},
         {"in. -> RunDouble -> out", "1:5: expected a key name after '.' but found '->'"},
+        {"(in., b) -> RunDouble -> out", "1:5: expected a key name after '.' but found ','"},
+        {"(a: in.) -> RunDouble -> out", "1:8: expected a key name after '.' but found ')'"},
+        {"(msg.x, y) -> RunDouble -> out", "1:2: only 'in' and 'out' take a '.<key>', not 'msg.x'"},
+        {"(a: x, b: q.k) -> RunDouble -> out", "1:11: only 'in' and 'out' take a '.<key>', not 'q.k'"},
+        {"(out, y) -> RunDouble -> out", "1:2: 'out' may only appear as the last term of a statement"},
+        {"(y, out.k) -> RunDouble -> out", "1:5: 'out' may only appear as the last term of a statement"},
+        {"(end, y) -> RunDouble -> out", "1:2: 'end' may only appear as the last term of a statement"},
     };
 
     for (const auto& [source, expected] : cases)
@@ -1095,6 +1116,14 @@ TEST_CASE("A syntax error ends only its own statement", "[GraphDslErrors]")
 
     REQUIRE(dsl::formatDiagnostics(diagnostics)
             == "1:17: expected '->' but found 'RunDouble'\n2:41: unterminated string literal");
+}
+
+TEST_CASE("Both parsers agree on graph inputs inside fan-in groups", "[GraphDslErrors]")
+{
+    parseWithBoth("(in.orders, in.quotes) -> RunDouble -> out\n");
+    parseWithBoth("(quote: in . quotes, order: in.orders) -> RunDouble -> out\n");
+    parseWithBoth("in.orders -> RunDouble -> a\n(x: a, y: in.quotes) -> RunDouble -> out\n");
+    parseWithBoth("in -> RunDouble -> a\n(x: in, y: a) -> RunDouble -> out\n");
 }
 
 TEST_CASE("Both parsers agree on strings, numbers and comments", "[GraphDslErrors]")

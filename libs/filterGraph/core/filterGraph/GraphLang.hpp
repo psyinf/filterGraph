@@ -45,7 +45,8 @@
 // - fan-in = a source group `(a, b) -> Merge -> c`, where Merge is a merge
 //   stage (see registerMergeFilter in MergeFilter.hpp); the group may name the
 //   merge's slots, `(raw: a, checked: b) -> Merge -> c`, which matches them by
-//   name instead of by position;
+//   name instead of by position; a group may read `in` / `in.<key>` directly,
+//   `(in, a)` or `(plots: a, ticks: in.ticks)`;
 // - `#` starts a comment that runs to the end of the line.
 //
 // This header parses (with a lexy-based parser) and structurally validates a
@@ -327,9 +328,52 @@ struct Term
     std::optional<std::string> key;     // for `in.<key>` / `out.<key>`
     nlohmann::json             config;  // for Stage
     std::vector<std::string>   edges;   // for Group
+    std::vector<std::optional<std::string>> edgeKeys; // for Group: per edge, from `edge.<key>`
+    std::vector<SourceLoc>     edgeLocs;  // for Group: per edge
     std::vector<std::string>   slotNames; // for Group: per edge, from `name: edge`; "" when unnamed
     SourceLoc                  loc;
 };
+
+// Adds the graph input `edge` ("in" or "in.<key>") to the program on its first use.
+inline void bindInput(GraphProgram& program, const std::string& edge, const std::optional<std::string>& key,
+                      const SourceLoc& loc)
+{
+    const bool seen = std::any_of(program.inputs.begin(), program.inputs.end(),
+                                  [&](const InputBinding& input) { return input.edge == edge; });
+    if (!seen)
+    {
+        program.inputs.push_back({edge, key, loc});
+    }
+}
+
+// Checks the edges of a fan-in group: `in` and `in.<key>` are graph inputs,
+// `out` and `end` are sinks, and no other edge takes a key. Spells each keyed
+// input as its edge, "in.<key>".
+inline bool checkGroupEdges(Term& group, std::vector<TextDiagnostic>& diags)
+{
+    for (std::size_t j = 0; j < group.edges.size(); ++j)
+    {
+        std::string&                      edge = group.edges[j];
+        const std::optional<std::string>& key  = group.edgeKeys[j];
+        if (edge == "out" || edge == "end")
+        {
+            diags.push_back({group.edgeLocs[j],
+                             std::format("'{}' may only appear as the last term of a statement", edge)});
+            return false;
+        }
+        if (key && edge != "in")
+        {
+            diags.push_back({group.edgeLocs[j],
+                             std::format("only 'in' and 'out' take a '.<key>', not '{}.{}'", edge, *key)});
+            return false;
+        }
+        if (key)
+        {
+            edge = "in." + *key;
+        }
+    }
+    return true;
+}
 
 // Checks the slot names of a fan-in group: all slots are named or none, and no
 // name is used twice.
@@ -419,7 +463,8 @@ inline void buildStatement(std::vector<Term>&           terms,
                 diags.push_back({terms[i].loc, "a fan-in group needs at least one edge"});
                 return;
             }
-            if (terms[i].kind == Term::Kind::Group && !checkSlotNames(terms[i], diags))
+            if (terms[i].kind == Term::Kind::Group &&
+                (!checkGroupEdges(terms[i], diags) || !checkSlotNames(terms[i], diags)))
             {
                 return;
             }
@@ -454,16 +499,18 @@ inline void buildStatement(std::vector<Term>&           terms,
             {
                 node.slotNames = source.slotNames;
             }
+            for (std::size_t j = 0; j < source.edges.size(); ++j)
+            {
+                if (source.edges[j] == "in" || source.edgeKeys[j])
+                {
+                    bindInput(program, source.edges[j], source.edgeKeys[j], source.edgeLocs[j]);
+                }
+            }
         }
         else if (source.name == "in")
         {
             const std::string edge = source.key ? "in." + *source.key : std::string{"in"};
-            const bool        seen = std::any_of(program.inputs.begin(), program.inputs.end(),
-                                                 [&](const InputBinding& input) { return input.edge == edge; });
-            if (!seen)
-            {
-                program.inputs.push_back({edge, source.key, source.loc});
-            }
+            bindInput(program, edge, source.key, source.loc);
             node.inputs = {edge};
         }
         else
@@ -876,8 +923,9 @@ inline bool parseStatementLine(std::string_view             lineText,
             {
                 return unexpected("expected an edge name in group");
             }
-            // `edge`, or `name: edge` for a named slot.
-            std::string edge = captureIdent();
+            // `edge`, or `name: edge` for a named slot; the edge may be `in.<key>`.
+            SourceLoc   edgeLoc = locOf(sc.position());
+            std::string edge    = captureIdent();
             std::string slot;
             skipBlank();
             if (sc.branch(ld::lit_c<':'>))
@@ -887,9 +935,23 @@ inline bool parseStatementLine(std::string_view             lineText,
                 {
                     return unexpected(std::format("expected an edge name after '{}:'", edge));
                 }
-                slot = std::exchange(edge, captureIdent());
+                edgeLoc = locOf(sc.position());
+                slot    = std::exchange(edge, captureIdent());
+                skipBlank();
+            }
+            std::optional<std::string> key;
+            if (sc.branch(ld::lit_c<'.'>))
+            {
+                skipBlank();
+                if (!sc.peek(ld::ascii::alpha_underscore))
+                {
+                    return unexpected("expected a key name after '.'");
+                }
+                key = captureIdent();
             }
             term.edges.push_back(std::move(edge));
+            term.edgeKeys.push_back(std::move(key));
+            term.edgeLocs.push_back(edgeLoc);
             term.slotNames.push_back(std::move(slot));
         }
     };

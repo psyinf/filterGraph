@@ -5,6 +5,7 @@
 //  - several named graph inputs, `in.<key>`, fed by push() or filter()
 //  - the build-time and run-time checks that the names make possible
 //  - toMermaid, which labels a merge's edges with its slot names
+//  - a merge that reads a named input directly, `(greeting: in.greeting, ...)`
 //
 // See EXAMPLE.md, "Names in the wiring: merge slots and graph inputs".
 #include <filterGraph/core/filterGraph/DslFilterGraph.hpp>
@@ -212,6 +213,22 @@ int main()
 
         // 6) toMermaid labels the merge's edges with the slot names.
         std::cout << '\n' << dsl::toMermaid(greet.program());
+    }
+
+    // 7) A group can read a named input directly: the greeting needs no
+    //    preparing, so no stage has to copy it onto an edge of its own. The
+    //    undeclared input takes the type of the slot it feeds.
+    {
+        DslFilterGraph<GraphInputs, std::string> greet(R"dsl(
+            in.name -> Capitalize -> proper
+            (greeting: in.greeting, name: proper) -> Greet -> out
+        )dsl");
+
+        std::cout << "\n[direct] " << *greet.push("greeting", std::string{"Welcome"}) << '\n';
+        std::cout << "[direct] "
+                  << *greet.filter(GraphInputs{}.set("greeting", std::string{"Welcome"}).set("name", std::string{"lINUS"}))
+                  << "\n\n"
+                  << dsl::toAscii(greet.program());
     }
 
     return 0;

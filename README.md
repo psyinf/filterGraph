@@ -247,8 +247,8 @@ edge -> Stage -> edge -> Stage(key=value) -> edge
 
   | Name | Meaning |
   | --- | --- |
-  | `in` | the graph's input; may only start a statement |
-  | `in.<key>` | a named input, for a graph with several (see [Several named inputs](#several-named-inputs)) |
+  | `in` | the graph's input; may only start a statement or appear in a fan-in group |
+  | `in.<key>` | a named input, for a graph with several (see [Several named inputs](#several-named-inputs)); placed like `in` |
   | `out` | the graph's output; may only end a statement |
   | `out.<key>` | a named output (several outputs are ordered as written) |
   | `end` | a dead end: the value is discarded (required for `Void` stages) |
@@ -262,6 +262,8 @@ edge -> Stage -> edge -> Stage(key=value) -> edge
   `registerMergeFilter<OutputType>(name, combiner)` does. A group may name the
   slots of a merge that declares names, `(raw: msg, checked: valid) -> Merge`,
   and is then matched by name, in any order (see [Named slots](#named-slots)).
+  A group may read the graph's input directly, `(in, valid)` or
+  `(quote: in.quotes, order: order)`; `out` and `end` cannot appear in a group.
 - `#` starts a comment that runs to the end of the line.
 
 ### How a graph runs
@@ -399,11 +401,20 @@ matcher.filter(GraphInputs{}.set("orders", order).set("quotes", quote)); // one 
 - One `push` or `filter` is one run. An input not fed in that run is empty,
   exactly like a dropped path: the stages reading it are skipped, and a merge
   sees a hole.
+- A merge can read named inputs directly, so a stage that reacts to two kinds
+  of message needs no pass-through stage in front of it:
+
+  ```text
+  in.plots -> DropDuplicatePlots -> plots
+  (plots: plots, ticks: in.ticks) -> GatedTracker -> out
+  ```
+
+  Each run feeds one input, and the merge sees a hole in the other slot.
 - `GraphInputs::of<Types...>(keys...)` declares the input types, which are then
   checked like every other edge when the graph is built; a declared input the
   graph never reads, and a read input that is not declared, are diagnostics.
   Without a declaration, an input takes the type of the first stage that reads
-  it.
+  it (or, for a merge, of the slot it feeds).
 - Feeding an unknown key throws `std::out_of_range`; a value whose type differs
   from the input's (declared or inferred) type throws `std::invalid_argument`.
 - A graph uses either `in` or named inputs: `in` with `GraphInputs`, or

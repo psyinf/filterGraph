@@ -63,10 +63,45 @@ public:
     }
 };
 
-static FilterRegistrar<ParseOrderFilter>  registerParseOrder("InParseOrder");
-static FilterRegistrar<ParseQuoteFilter>  registerParseQuote("InParseQuote");
-static FilterRegistrar<IntToStringFilter> registerIntToString("InIntToString");
-static FilterRegistrar<MatchMerge>        registerMatch("InMatch");
+// Reads the raw inputs: "<quantity>@<price>", with "-" for a hole.
+class OrderQuoteMerge : public TypedMergeFilter<std::string, Order, Quote>
+{
+public:
+    std::optional<std::string> merge(std::optional<Order>&& order, std::optional<Quote>&& quote) override
+    {
+        return std::format("{}@{}", order ? std::to_string(order->quantity) : "-",
+                           quote ? std::format("{}", quote->price) : "-");
+    }
+};
+
+// OrderQuoteMerge with named slots.
+class NamedOrderQuoteMerge : public OrderQuoteMerge
+{
+public:
+    std::vector<std::string> mergeInputNames() const override
+    {
+        return {"order", "quote"};
+    }
+};
+
+// "<raw quantity>=<parsed quantity>", for a single-input graph.
+class OrderQuantityMerge : public TypedMergeFilter<std::string, Order, int>
+{
+public:
+    std::optional<std::string> merge(std::optional<Order>&& order, std::optional<int>&& quantity) override
+    {
+        return std::format("{}={}", order ? std::to_string(order->quantity) : "-",
+                           quantity ? std::to_string(*quantity) : "-");
+    }
+};
+
+static FilterRegistrar<OrderQuantityMerge>   registerOrderQuantity("InOrderQuantity");
+static FilterRegistrar<ParseOrderFilter>     registerParseOrder("InParseOrder");
+static FilterRegistrar<ParseQuoteFilter>     registerParseQuote("InParseQuote");
+static FilterRegistrar<IntToStringFilter>    registerIntToString("InIntToString");
+static FilterRegistrar<MatchMerge>           registerMatch("InMatch");
+static FilterRegistrar<OrderQuoteMerge>      registerOrderQuote("InOrderQuote");
+static FilterRegistrar<NamedOrderQuoteMerge> registerNamedOrderQuote("InNamedOrderQuote");
 
 const char* kMatchGraph = R"(
     in.orders -> InParseOrder -> quantity
@@ -196,6 +231,107 @@ TEST_CASE("The parsed program lists its inputs", "[GraphInputs]")
     const auto plain = dsl::parseGraphProgram("in -> InParseOrder -> out");
     REQUIRE(plain.inputs.size() == 1);
     REQUIRE_FALSE(plain.inputs[0].key.has_value());
+}
+
+TEST_CASE("A fan-in group reads named inputs directly", "[GraphInputs]")
+{
+    DslFilterGraph<GraphInputs, std::string> graph("(in.orders, in.quotes) -> InOrderQuote -> out");
+
+    REQUIRE(graph.push("orders", Order{3}).value() == "3@-");
+    REQUIRE(graph.push("quotes", Quote{1.5}).value() == "-@1.5");
+    REQUIRE(graph.filter(GraphInputs{}.set("orders", Order{2}).set("quotes", Quote{0.5})).value() == "2@0.5");
+    REQUIRE_FALSE(graph.filter(GraphInputs{}).has_value());
+}
+
+TEST_CASE("A named slot binds a named input by name", "[GraphInputs]")
+{
+    DslFilterGraph<GraphInputs, std::string> graph("(quote: in.quotes, order: in.orders) -> InNamedOrderQuote -> out");
+
+    REQUIRE(graph.push("orders", Order{4}).value() == "4@-");
+    REQUIRE(graph.filter(GraphInputs{}.set("orders", Order{1}).set("quotes", Quote{2.5})).value() == "1@2.5");
+}
+
+TEST_CASE("A group mixes named inputs and ordinary edges", "[GraphInputs]")
+{
+    DslFilterGraph<GraphInputs, std::string> graph(R"(
+        in.orders -> InParseOrder -> quantity
+        (quantity, in.quotes) -> InMatch -> out
+    )");
+
+    REQUIRE(graph.push("orders", Order{3}).value() == "3@-");
+    REQUIRE(graph.filter(GraphInputs{}.set("orders", Order{2}).set("quotes", 0.5)).value() == "2@0.5");
+}
+
+TEST_CASE("A plain in feeds a fan-in group of a single-input graph", "[GraphInputs]")
+{
+    DslFilterGraph<Order, std::string> graph(R"(
+        in -> InParseOrder -> quantity
+        (in, quantity) -> InOrderQuantity -> out
+    )");
+
+    REQUIRE(graph.filter(Order{5}).value() == "5=5");
+    REQUIRE(dsl::parseGraphProgram("(in, in) -> InOrderQuote -> out").inputs.size() == 1);
+}
+
+TEST_CASE("Declared input types are checked for group readers", "[GraphInputs]")
+{
+    const char* source = "(in.orders, in.quotes) -> InOrderQuote -> out";
+
+    DslFilterGraph<GraphInputs, std::string> graph(source, GraphInputs::of<Order, Quote>("orders", "quotes"));
+    REQUIRE(graph.push("quotes", Quote{0.5}).value() == "-@0.5");
+
+    const auto swapped =
+        validateDslGraph<GraphInputs, std::string>(source, GraphInputs::of<Quote, Order>("orders", "quotes"));
+    REQUIRE(swapped.size() == 2);
+    REQUIRE(swapped[1].message.starts_with("slot 2 of 'InOrderQuote' expects"));
+    REQUIRE(swapped[1].message.find("the graph input 'in.quotes' carries") != std::string::npos);
+}
+
+TEST_CASE("An undeclared input read only by a group takes the slot's type", "[GraphInputs]")
+{
+    DslFilterGraph<GraphInputs, std::string> graph(R"(
+        in.orders -> InParseOrder -> quantity
+        (quantity, in.quotes) -> InMatch -> out
+    )");
+
+    REQUIRE(graph.push("quotes", 1.5).value() == "-@1.5");
+    REQUIRE_THROWS_AS(graph.push("quotes", Quote{1.5}), std::invalid_argument);
+
+    const auto diagnostics = validateDslGraph<GraphInputs, GraphOutputs>(R"(
+        (in.orders, in.quotes) -> InOrderQuote -> out.pair
+        in.quotes -> InIntToString -> out.text
+    )");
+    REQUIRE(diagnostics.size() == 1);
+    REQUIRE(diagnostics[0].message.find("the graph input 'in.quotes' (typed by its reader 'InOrderQuote')")
+            != std::string::npos);
+}
+
+TEST_CASE("Only in takes a key inside a group, and sinks cannot feed one", "[GraphInputs]")
+{
+    const auto keyed = dsl::parseGraphProgram("(msg.x, y) -> InMatch -> out");
+    REQUIRE(dsl::formatDiagnostics(keyed.diagnostics) == "1:2: only 'in' and 'out' take a '.<key>', not 'msg.x'");
+
+    const auto out = dsl::parseGraphProgram("(out, y) -> InMatch -> out");
+    REQUIRE(dsl::formatDiagnostics(out.diagnostics) == "1:2: 'out' may only appear as the last term of a statement");
+
+    const auto outKey = dsl::parseGraphProgram("(y, out.x) -> InMatch -> out");
+    REQUIRE(dsl::formatDiagnostics(outKey.diagnostics) == "1:5: 'out' may only appear as the last term of a statement");
+}
+
+TEST_CASE("The parsed program lists inputs read only by a group", "[GraphInputs]")
+{
+    const auto program = dsl::parseGraphProgram("in.orders -> InParseOrder -> a\n"
+                                                "(a, in.quotes) -> InMatch -> out\n");
+    REQUIRE(program.ok());
+    REQUIRE(program.inputs.size() == 2);
+    REQUIRE(program.inputs[1].edge == "in.quotes");
+    REQUIRE(program.inputs[1].key == "quotes");
+    REQUIRE(program.inputs[1].loc.line == 2);
+    REQUIRE(program.inputs[1].loc.column == 5);
+    REQUIRE(program.stages[1].inputs == std::vector<std::string>{"a", "in.quotes"});
+
+    const auto twice = dsl::parseGraphProgram("(in.orders, in.orders) -> InOrderQuote -> out");
+    REQUIRE(twice.inputs.size() == 1);
 }
 
 TEST_CASE("A graph with named inputs nests as a stage", "[GraphInputs]")

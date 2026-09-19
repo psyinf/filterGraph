@@ -437,11 +437,12 @@ inline std::optional<std::vector<std::string>> matchSlotNames(const StageNode&  
 // matches named slots by name and positional ones by position, checks the
 // edges against the declared slot types, and returns the group's edges in the
 // stage's slot order. An untyped merge with positional slots is not checked.
+// An undeclared graph input read by a slot takes the slot's type.
 // Problems are appended to `diagnostics`; the plan must then not be run.
 inline std::vector<std::string> wireMergeSlots(const StageNode&                node,
                                                const MergeSlotTypes&           types,
                                                const std::vector<std::string>& names,
-                                               const EdgeTypes&                edgeTypes,
+                                               EdgeTypes&                      edgeTypes,
                                                std::vector<TextDiagnostic>&    diagnostics)
 {
     if (!names.empty() && !checkDeclaredSlotNames(node, types, names, diagnostics))
@@ -480,7 +481,12 @@ inline std::vector<std::string> wireMergeSlots(const StageNode&                n
     {
         const std::type_index expected = types.uniform ? types.types.front() : types.types[slot];
         const auto            type     = edgeTypes.find(edges[slot]);
-        if (type && *type != expected)
+        if (!type && isInputEdge(edges[slot]))
+        {
+            edgeTypes.types.emplace(edges[slot], expected);
+            edgeTypes.inferredFrom.emplace(edges[slot], node.type);
+        }
+        else if (type && *type != expected)
         {
             const std::string label = names.empty() ? std::to_string(slot + 1) : std::format("'{}'", names[slot]);
             diagnostics.push_back({node.loc,
