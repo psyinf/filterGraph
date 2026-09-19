@@ -49,7 +49,8 @@
 // - `#` starts a comment that runs to the end of the line.
 //
 // This header parses (with a lexy-based parser) and structurally validates a
-// program into a node/edge IR (GraphProgram) and renders it with toMermaid;
+// program into a node/edge IR (GraphProgram) and renders it with toMermaid or
+// toDot;
 // DslFilterGraph instantiates, type-checks and runs it. The original
 // hand-written parser is deprecated (GraphLangHandwritten.hpp).
 namespace filterGraph::dsl {
@@ -1014,6 +1015,65 @@ inline GraphProgram parseGraphProgram(std::string_view text)
 
 namespace detail {
 
+// The name each edge is shown under in a rendering: output edges (internally
+// "$outN") become `out`, `out.<key>` or `out[<index>]`; every other edge keeps
+// its own name.
+inline std::unordered_map<std::string, std::string> edgeDisplayNames(const GraphProgram& program)
+{
+    std::unordered_map<std::string, std::string> names;
+    for (const auto& output : program.outputs)
+    {
+        names[output.edge] = output.key                   ? "out." + *output.key
+                           : program.outputs.size() > 1 ? std::format("out[{}]", output.index)
+                                                        : std::string{"out"};
+    }
+    return names;
+}
+
+inline std::string displayName(const std::unordered_map<std::string, std::string>& names, const std::string& edge)
+{
+    auto it = names.find(edge);
+    return it != names.end() ? it->second : edge;
+}
+
+// A stage's config as "key=value" lines, strings unquoted, for diagram labels.
+inline std::vector<std::string> configLines(const StageNode& stage)
+{
+    std::vector<std::string> lines;
+    if (stage.config.is_object())
+    {
+        for (const auto& item : stage.config.items())
+        {
+            const std::string value = item.value().is_string() ? item.value().get<std::string>() : item.value().dump();
+            lines.push_back(item.key() + '=' + value);
+        }
+    }
+    return lines;
+}
+
+// Escapes text for a quoted DOT string.
+inline std::string dotLabel(std::string_view text)
+{
+    std::string label;
+    for (char c : text)
+    {
+        if (c == '"' || c == '\\')
+        {
+            label += '\\';
+            label += c;
+        }
+        else if (c == '\n')
+        {
+            label += "\\n";
+        }
+        else
+        {
+            label += c;
+        }
+    }
+    return label;
+}
+
 // Escapes the characters that would end or confuse a quoted Mermaid label.
 inline std::string mermaidLabel(std::string_view text)
 {
@@ -1048,13 +1108,7 @@ inline std::string mermaidLabel(std::string_view text)
 // keywords such as `end`.
 inline std::string toMermaid(const GraphProgram& program)
 {
-    std::unordered_map<std::string, std::string> outputLabels;
-    for (const auto& output : program.outputs)
-    {
-        outputLabels[output.edge] = output.key                   ? "out." + *output.key
-                                  : program.outputs.size() > 1 ? std::format("out[{}]", output.index)
-                                                               : std::string{"out"};
-    }
+    const auto displayNames = detail::edgeDisplayNames(program);
 
     std::string                                  nodes;
     std::string                                  links;
@@ -1065,10 +1119,8 @@ inline std::string toMermaid(const GraphProgram& program)
         {
             return it->second;
         }
-        std::string id    = std::format("e{}", edgeIds.size());
-        auto        label = outputLabels.find(edge);
-        nodes += std::format("    {}([\"{}\"])\n", id,
-                             detail::mermaidLabel(label != outputLabels.end() ? label->second : edge));
+        std::string id = std::format("e{}", edgeIds.size());
+        nodes += std::format("    {}([\"{}\"])\n", id, detail::mermaidLabel(detail::displayName(displayNames, edge)));
         edgeIds.emplace(edge, id);
         return id;
     };
@@ -1079,13 +1131,9 @@ inline std::string toMermaid(const GraphProgram& program)
         const StageNode& stage = program.stages[i];
 
         std::string label = detail::mermaidLabel(stage.type);
-        if (stage.config.is_object())
+        for (const auto& line : detail::configLines(stage))
         {
-            for (const auto& item : stage.config.items())
-            {
-                const std::string value = item.value().is_string() ? item.value().get<std::string>() : item.value().dump();
-                label += std::format("<br/>{}={}", detail::mermaidLabel(item.key()), detail::mermaidLabel(value));
-            }
+            label += "<br/>" + detail::mermaidLabel(line);
         }
         nodes += std::format("    s{}[\"{}\"]\n", i, label);
 
@@ -1114,6 +1162,70 @@ inline std::string toMermaid(const GraphProgram& program)
         }
     }
     return "flowchart LR\n" + nodes + links;
+}
+
+// Renders a parsed program as a Graphviz DOT digraph: the same picture as
+// toMermaid, with the same node ids. Stages are boxes (listing their config),
+// edges are ellipses, every `-> end` gets its own double-bordered box, and the
+// links of a named group carry the slot names. Render it with `dot -Tsvg`, or
+// in a console with `graph-easy --as=boxart`.
+inline std::string toDot(const GraphProgram& program)
+{
+    const auto displayNames = detail::edgeDisplayNames(program);
+
+    std::string                                  nodes;
+    std::string                                  links;
+    std::unordered_map<std::string, std::string> edgeIds;
+
+    auto edgeId = [&](const std::string& edge) -> std::string {
+        if (auto it = edgeIds.find(edge); it != edgeIds.end())
+        {
+            return it->second;
+        }
+        std::string id = std::format("e{}", edgeIds.size());
+        nodes += std::format("    {} [shape=ellipse, label=\"{}\"];\n", id,
+                             detail::dotLabel(detail::displayName(displayNames, edge)));
+        edgeIds.emplace(edge, id);
+        return id;
+    };
+
+    std::size_t deadEnds = 0;
+    for (std::size_t i = 0; i < program.stages.size(); ++i)
+    {
+        const StageNode& stage = program.stages[i];
+
+        std::string label = detail::dotLabel(stage.type);
+        for (const auto& line : detail::configLines(stage))
+        {
+            label += "\\n" + detail::dotLabel(line);
+        }
+        nodes += std::format("    s{} [shape=box, label=\"{}\"];\n", i, label);
+
+        for (std::size_t slot = 0; slot < stage.inputs.size(); ++slot)
+        {
+            const std::string& input = stage.inputs[slot];
+            if (stage.slotNames.empty())
+            {
+                links += std::format("    {} -> s{};\n", edgeId(input), i);
+            }
+            else
+            {
+                links += std::format("    {} -> s{} [label=\"{}\"];\n", edgeId(input), i,
+                                     detail::dotLabel(stage.slotNames[slot]));
+            }
+        }
+        if (stage.output)
+        {
+            links += std::format("    s{} -> {};\n", i, edgeId(*stage.output));
+        }
+        else
+        {
+            nodes += std::format("    d{} [shape=box, peripheries=2, label=\"end\"];\n", deadEnds);
+            links += std::format("    s{} -> d{};\n", i, deadEnds);
+            ++deadEnds;
+        }
+    }
+    return "digraph filterGraph {\n    rankdir=LR;\n" + nodes + links + "}\n";
 }
 
 } // namespace filterGraph::dsl

@@ -915,6 +915,33 @@ TEST_CASE("toMermaid generates node ids and labels outputs, config and dead ends
     REQUIRE(mermaid.find('$') == std::string::npos);
 }
 
+TEST_CASE("toDot renders the same picture as toMermaid", "[GraphDsl]")
+{
+    auto program = dsl::parseGraphProgram("in -> RunDouble -> out.twice\nin -> RunRecord(label=tap) -> end\n");
+    REQUIRE(program.ok());
+
+    const std::string dot = dsl::toDot(program);
+    REQUIRE(dot.starts_with("digraph filterGraph {\n    rankdir=LR;\n"));
+    REQUIRE(dot.ends_with("}\n"));
+    REQUIRE(dot.find("e0 [shape=ellipse, label=\"in\"];") != std::string::npos);
+    REQUIRE(dot.find("[shape=ellipse, label=\"out.twice\"];") != std::string::npos);
+    REQUIRE(dot.find("s1 [shape=box, label=\"RunRecord\\nlabel=tap\"];") != std::string::npos);
+    REQUIRE(dot.find("d0 [shape=box, peripheries=2, label=\"end\"];") != std::string::npos);
+    REQUIRE(dot.find("e0 -> s0;") != std::string::npos);
+    REQUIRE(dot.find("s1 -> d0;") != std::string::npos);
+    REQUIRE(dot.find('$') == std::string::npos);
+}
+
+TEST_CASE("toDot escapes quotes and backslashes in labels", "[GraphDsl]")
+{
+    auto program = dsl::parseGraphProgram("in -> RunRecord(label=\"say \\\"hi\\\" \\\\ bye\") -> out\n");
+    REQUIRE(program.ok());
+    REQUIRE(program.stages[0].config["label"] == "say \"hi\" \\ bye");
+
+    const std::string dot = dsl::toDot(program);
+    REQUIRE(dot.find("label=\"RunRecord\\nlabel=say \\\"hi\\\" \\\\ bye\"") != std::string::npos);
+}
+
 // ---------------------------------------------------------------------------
 // Parser diagnostics: the hand-written and lexy parsers must agree exactly
 // ---------------------------------------------------------------------------

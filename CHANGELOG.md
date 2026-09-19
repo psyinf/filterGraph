@@ -102,6 +102,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nullptr meaning "a fresh empty one"). `context()` returns a `GraphContext&`
   and is never null, so stages need no null check; `sharedContext()` hands out
   the `std::shared_ptr` for composites that forward it.
+- **`dsl::toDot`** — renders a parsed graph as a Graphviz DOT digraph, the same
+  picture as `toMermaid` with the same node ids (stages as boxes listing their
+  arguments, edges as ellipses, a box per dead end, slot names on the links of
+  a named group). `dot -Tsvg` renders it as an image, `graph-easy --as=boxart`
+  in a console.
 
 ### Changed
 - A `.<key>` on anything but `in` and `out` (e.g. `msg.x`) is now a diagnostic;

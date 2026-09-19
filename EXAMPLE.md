@@ -408,6 +408,10 @@ flowchart LR
     s4 --> e4
 ```
 
+`dsl::toDot` renders the same picture, with the same node ids, as a Graphviz
+DOT digraph. Pipe it into `dot -Tsvg -o pipeline.svg` for an image, or into
+`graph-easy --as=boxart` to draw it in a console.
+
 ## 7. The same pipeline in JSON
 
 The JSON format remains supported and uses the same registered stages. JSON
