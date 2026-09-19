@@ -286,6 +286,23 @@ TEST_CASE("toDot labels a named group's links with the slot names", "[NamedSlots
     REQUIRE(dot.find("e0 -> s0;") != std::string::npos);
 }
 
+TEST_CASE("toAscii heads a named merge with its named group", "[NamedSlots]")
+{
+    const auto program = dsl::parseGraphProgram("in.x -> SlotPlusOne -> small\n"
+                                                "in.x -> SlotTimesTen -> large\n"
+                                                "(bonus: small, base: large) -> SlotDifference -> out\n");
+    REQUIRE(program.ok());
+
+    REQUIRE(dsl::toAscii(program) == "in.x\n"
+                                     "+-> SlotPlusOne -> small\n"
+                                     "|   `-> SlotDifference (merge, see below)\n"
+                                     "`-> SlotTimesTen -> large\n"
+                                     "    `-> SlotDifference (merge, see below)\n"
+                                     "\n"
+                                     "(bonus: small, base: large)\n"
+                                     "`-> SlotDifference -> out\n");
+}
+
 TEST_CASE("The parsed program and toMermaid carry the slot names", "[NamedSlots]")
 {
     const auto program = dsl::parseGraphProgram("in -> SlotPlusOne -> small\n"

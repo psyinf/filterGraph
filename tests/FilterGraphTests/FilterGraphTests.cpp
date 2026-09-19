@@ -932,6 +932,48 @@ TEST_CASE("toDot renders the same picture as toMermaid", "[GraphDsl]")
     REQUIRE(dot.find('$') == std::string::npos);
 }
 
+TEST_CASE("toAscii lists fan-out as siblings and a merge under its group", "[GraphDsl]")
+{
+    auto program = dsl::parseGraphProgram("in -> RunDouble -> msg\n"
+                                          "msg -> RunDropOdd -> valid\n"
+                                          "(msg, valid) -> RunDescribe -> out.stats\n");
+    REQUIRE(program.ok());
+
+    REQUIRE(dsl::toAscii(program) == "in\n"
+                                     "`-> RunDouble -> msg\n"
+                                     "    +-> RunDropOdd -> valid\n"
+                                     "    |   `-> RunDescribe (merge, see below)\n"
+                                     "    `-> RunDescribe (merge, see below)\n"
+                                     "\n"
+                                     "(msg, valid)\n"
+                                     "`-> RunDescribe -> out.stats\n");
+}
+
+TEST_CASE("toAscii shows arguments, dead ends and outputs, in plain or Unicode characters", "[GraphDsl]")
+{
+    auto program = dsl::parseGraphProgram("in -> RunRecord(n=3, s=\"x\") -> end\nin -> RunDouble -> out\n");
+    REQUIRE(program.ok());
+
+    REQUIRE(dsl::toAscii(program) == "in\n"
+                                     "+-> RunRecord(n=3, s=\"x\") -> end\n"
+                                     "`-> RunDouble -> out\n");
+    REQUIRE(dsl::toAscii(program, dsl::AsciiStyle::unicode) ==
+            "in\n"
+            "\xE2\x94\x9C\xE2\x94\x80\xE2\x96\xBA RunRecord(n=3, s=\"x\") \xE2\x94\x80\xE2\x96\xBA end\n"
+            "\xE2\x94\x94\xE2\x94\x80\xE2\x96\xBA RunDouble \xE2\x94\x80\xE2\x96\xBA out\n");
+}
+
+TEST_CASE("toAscii prints every stage of an invalid program once", "[GraphDsl]")
+{
+    auto program = dsl::parseGraphProgram("a -> X -> b\nb -> Y -> a\n");
+    REQUIRE_FALSE(program.ok());
+
+    REQUIRE(dsl::toAscii(program) == "a\n"
+                                     "`-> X -> b\n"
+                                     "    `-> Y -> a\n"
+                                     "        `-> X (see above)\n");
+}
+
 TEST_CASE("toDot escapes quotes and backslashes in labels", "[GraphDsl]")
 {
     auto program = dsl::parseGraphProgram("in -> RunRecord(label=\"say \\\"hi\\\" \\\\ bye\") -> out\n");

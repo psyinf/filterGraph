@@ -107,6 +107,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arguments, edges as ellipses, a box per dead end, slot names on the links of
   a named group). `dot -Tsvg` renders it as an image, `graph-easy --as=boxart`
   in a console.
+- **`dsl::toAscii`** — prints a parsed graph as an indented text listing, with
+  no external tool: one tree per graph input, each line a stage followed by the
+  edge it produces (or `end`), fan-out as siblings, and each merge under its
+  (named) group once its inputs have been shown. `AsciiStyle::plain` (the
+  default) draws with ASCII, `AsciiStyle::unicode` with box-drawing characters.
 
 ### Changed
 - A `.<key>` on anything but `in` and `out` (e.g. `msg.x`) is now a diagnostic;

@@ -49,8 +49,8 @@
 // - `#` starts a comment that runs to the end of the line.
 //
 // This header parses (with a lexy-based parser) and structurally validates a
-// program into a node/edge IR (GraphProgram) and renders it with toMermaid or
-// toDot;
+// program into a node/edge IR (GraphProgram) and renders it with toMermaid,
+// toDot or toAscii;
 // DslFilterGraph instantiates, type-checks and runs it. The original
 // hand-written parser is deprecated (GraphLangHandwritten.hpp).
 namespace filterGraph::dsl {
@@ -1226,6 +1226,185 @@ inline std::string toDot(const GraphProgram& program)
         }
     }
     return "digraph filterGraph {\n    rankdir=LR;\n" + nodes + links + "}\n";
+}
+
+// The characters toAscii draws with: plain ASCII, or Unicode box drawing
+// (UTF-8, which a Windows console shows only with code page 65001).
+enum class AsciiStyle
+{
+    plain,
+    unicode,
+};
+
+namespace detail {
+
+struct AsciiGlyphs
+{
+    std::string_view branch; // a reader that has siblings below it
+    std::string_view last;   // the last reader of an edge
+    std::string_view pipe;   // continues a branch past a nested subtree
+    std::string_view blank;  // indents below a last reader
+    std::string_view arrow;  // stage -> produced edge
+};
+
+inline AsciiGlyphs asciiGlyphs(AsciiStyle style)
+{
+    if (style == AsciiStyle::unicode)
+    {
+        // ├─► └─► │ ─►
+        return {"\xE2\x94\x9C\xE2\x94\x80\xE2\x96\xBA ", "\xE2\x94\x94\xE2\x94\x80\xE2\x96\xBA ", "\xE2\x94\x82   ",
+                "    ", " \xE2\x94\x80\xE2\x96\xBA "};
+    }
+    return {"+-> ", "`-> ", "|   ", "    ", " -> "};
+}
+
+// A stage as written in the DSL: `Type`, or `Type(k=v, k2="s")`.
+inline std::string stageCall(const StageNode& stage)
+{
+    std::string text = stage.type;
+    if (stage.config.is_object() && !stage.config.empty())
+    {
+        std::string args;
+        for (const auto& item : stage.config.items())
+        {
+            args += (args.empty() ? "" : ", ") + item.key() + '=' + item.value().dump();
+        }
+        text += '(' + args + ')';
+    }
+    return text;
+}
+
+} // namespace detail
+
+// Renders a parsed program as an indented text listing, for a console or a log:
+// one tree per graph input, where each line is a stage reading the edge above
+// it, followed by the edge it produces (or `end`). Fan-out shows as siblings.
+// A merge appears in the trees of its inputs as a reference, and gets a tree of
+// its own, headed by its group, once all of its inputs have been shown:
+//
+//   in
+//   `-> Parse -> msg
+//       +-> Validate -> valid
+//       |   `-> Summarize (merge, see below)
+//       `-> Summarize (merge, see below)
+//
+//   (msg, valid)
+//   `-> Summarize -> out.stats
+inline std::string toAscii(const GraphProgram& program, AsciiStyle style = AsciiStyle::plain)
+{
+    const auto glyphs       = detail::asciiGlyphs(style);
+    const auto displayNames = detail::edgeDisplayNames(program);
+
+    std::unordered_map<std::string, std::vector<std::size_t>> readers;
+    for (std::size_t i = 0; i < program.stages.size(); ++i)
+    {
+        for (const auto& input : program.stages[i].inputs)
+        {
+            auto& stages = readers[input];
+            if (stages.empty() || stages.back() != i) // `(a, a) -> Merge` reads `a` once
+            {
+                stages.push_back(i);
+            }
+        }
+    }
+
+    std::vector<bool>               printed(program.stages.size(), false);
+    std::unordered_set<std::string> shown; // edges whose tree position is known
+    std::string                     text;
+
+    auto isMerge = [&](std::size_t i) { return program.stages[i].inputs.size() > 1; };
+
+    auto stageLine = [&](std::size_t i) {
+        const StageNode& stage = program.stages[i];
+        return detail::stageCall(stage) + std::string{glyphs.arrow} +
+               (stage.output ? detail::displayName(displayNames, *stage.output) : std::string{"end"}) + '\n';
+    };
+
+    auto printReaders = [&](auto&& self, const std::string& edge, const std::string& prefix) -> void {
+        auto it = readers.find(edge);
+        if (it == readers.end())
+        {
+            return;
+        }
+        for (std::size_t k = 0; k < it->second.size(); ++k)
+        {
+            const std::size_t i    = it->second[k];
+            const bool        last = k + 1 == it->second.size();
+            text += prefix + std::string{last ? glyphs.last : glyphs.branch};
+            if (printed[i] || isMerge(i))
+            {
+                text += program.stages[i].type + (printed[i] ? " (see above)\n" : " (merge, see below)\n");
+                continue;
+            }
+            printed[i] = true;
+            text += stageLine(i);
+            if (const auto& output = program.stages[i].output)
+            {
+                shown.insert(*output);
+                self(self, *output, prefix + std::string{last ? glyphs.blank : glyphs.pipe});
+            }
+        }
+    };
+
+    auto separate = [&] {
+        if (!text.empty())
+        {
+            text += '\n';
+        }
+    };
+
+    for (const auto& input : program.inputs)
+    {
+        separate();
+        text += detail::displayName(displayNames, input.edge) + '\n';
+        shown.insert(input.edge);
+        printReaders(printReaders, input.edge, "");
+    }
+
+    // Then the merges, each once all of its inputs are shown. Stages that never
+    // become ready (only in an invalid program, e.g. a cycle or a missing
+    // producer) are printed in order at the end, so every stage appears.
+    for (;;)
+    {
+        std::optional<std::size_t> next;
+        for (std::size_t i = 0; i < program.stages.size() && !next; ++i)
+        {
+            if (!printed[i] && isMerge(i) &&
+                std::ranges::all_of(program.stages[i].inputs, [&](const auto& edge) { return shown.contains(edge); }))
+            {
+                next = i;
+            }
+        }
+        for (std::size_t i = 0; i < program.stages.size() && !next; ++i)
+        {
+            if (!printed[i])
+            {
+                next = i;
+            }
+        }
+        if (!next)
+        {
+            break;
+        }
+
+        const StageNode& stage = program.stages[*next];
+        std::string      group;
+        for (std::size_t slot = 0; slot < stage.inputs.size(); ++slot)
+        {
+            group += (slot == 0 ? "" : ", ") + (stage.slotNames.empty() ? "" : stage.slotNames[slot] + ": ") +
+                     detail::displayName(displayNames, stage.inputs[slot]);
+        }
+        separate();
+        text += (stage.fanIn || stage.inputs.size() != 1 ? '(' + group + ')' : group) + '\n';
+        printed[*next] = true;
+        text += std::string{glyphs.last} + stageLine(*next);
+        if (stage.output)
+        {
+            shown.insert(*stage.output);
+            printReaders(printReaders, *stage.output, std::string{glyphs.blank});
+        }
+    }
+    return text;
 }
 
 } // namespace filterGraph::dsl
