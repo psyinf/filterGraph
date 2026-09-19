@@ -11,11 +11,13 @@ paths, merge them back together, and drop/short-circuit messages — all without
 hard-coding the pipeline shape in source code.
 
 > **New here? Start with the [example walkthrough (EXAMPLE.md)](EXAMPLE.md)** —
-> a step-by-step, diagrammed tour of three runnable samples:
+> a step-by-step, diagrammed tour of four runnable samples:
 > [`apps/textPipeline`](apps/textPipeline/main.cpp) (the core building blocks),
 > [`apps/statefulPipeline`](apps/statefulPipeline/main.cpp) (stages that carry
-> state) and [`apps/compositePipeline`](apps/compositePipeline/main.cpp)
-> (composing graphs out of graphs).
+> state), [`apps/compositePipeline`](apps/compositePipeline/main.cpp)
+> (composing graphs out of graphs) and
+> [`apps/namedPipeline`](apps/namedPipeline/main.cpp) (named merge slots and
+> graph inputs).
 
 > **A note on the word "filter".** Here "filter" follows the Unix-pipeline and
 > media-graph (DirectShow / GStreamer / FFmpeg) tradition: a stage that reads a
@@ -646,9 +648,10 @@ Run the bundled examples directly after building:
 ./out/build/windows-msvc-release-user-mode/apps/textPipeline/textPipeline
 ./out/build/windows-msvc-release-user-mode/apps/statefulPipeline/statefulPipeline
 ./out/build/windows-msvc-release-user-mode/apps/compositePipeline/compositePipeline
+./out/build/windows-msvc-release-user-mode/apps/namedPipeline/namedPipeline
 ```
 
-[EXAMPLE.md](EXAMPLE.md) walks through all three, with their output.
+[EXAMPLE.md](EXAMPLE.md) walks through all four, with their output.
 
 ## Roadmap
 
