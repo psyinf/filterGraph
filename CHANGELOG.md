@@ -7,7 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-21
+
 ### Added
+- **`JoinFilter<InputType, OutputType>`** — scatter-gather stage, the mirror of
+  `FanoutFilter` (N paths → 1 output). Scatters one message through N paths and
+  merges their gathered outputs via a C++ combiner; dropped paths leave holes
+  the combiner can see, and `Void`-terminated paths are rejected at
+  construction. `registerJoinFilter` builds one from JSON-configured paths.
+- **`validateGraph(json)` / `Diagnostic`** — pre-flight config validation that
+  walks a JSON graph without running messages and returns all problems at once
+  (unknown/typo'd stage types with suggestions, structural mistakes, adjacent
+  leaf type mismatches, bad/missing config), each located by a JSON pointer.
+  Backed by new `FilterRegistry::contains` / `registeredNames`.
+- **Text DSL front-end (`filterGraph::dsl`, `GraphLang.hpp`)** — parses a
+  named-edge graph description (`edge -> Stage -> edge`, reserved `in`/`out`/
+  `out.<key>`/`end`, fan-out by edge reuse, fan-in via `(a, b) -> Merge`,
+  ordered/keyed outputs, dead-ends) into a node/edge IR with line:col
+  diagnostics; `toMermaid` visualizes it. `DslFilterGraph` (below) runs it.
 - **`DslFilterGraph<InputType, OutputType>`** (`DslFilterGraph.hpp`) — runs
   graphs described in the text DSL, making it a first-class way to describe
   runtime graphs. Executes named-edge graphs with fan-out (every reader gets a
@@ -171,26 +188,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed in a future release. It produces the same results as
   `dsl::parseGraphProgram`, except that it does not support parameters; the
   tests check the two against each other.
-
-## [0.2.0] - 2026-09-15
-
-### Added
-- **`JoinFilter<InputType, OutputType>`** — scatter-gather stage, the mirror of
-  `FanoutFilter` (N paths → 1 output). Scatters one message through N paths and
-  merges their gathered outputs via a C++ combiner; dropped paths leave holes
-  the combiner can see, and `Void`-terminated paths are rejected at
-  construction. `registerJoinFilter` builds one from JSON-configured paths.
-- **`validateGraph(json)` / `Diagnostic`** — pre-flight config validation that
-  walks a JSON graph without running messages and returns all problems at once
-  (unknown/typo'd stage types with suggestions, structural mistakes, adjacent
-  leaf type mismatches, bad/missing config), each located by a JSON pointer.
-  Backed by new `FilterRegistry::contains` / `registeredNames`.
-- **Text DSL front-end (`filterGraph::dsl`, `GraphLang.hpp`)** — parses a
-  named-edge graph description (`edge -> Stage -> edge`, reserved `in`/`out`/
-  `out.<key>`/`end`, fan-out by edge reuse, fan-in via `(a, b) -> Merge`,
-  ordered/keyed outputs, dead-ends) into a node/edge IR with line:col
-  diagnostics; `toMermaid` visualizes it. Text front-end only (execution is a
-  planned follow-up).
 
 ## [0.1.0]
 
