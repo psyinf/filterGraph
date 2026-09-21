@@ -23,7 +23,7 @@ Examples use the generic stages of the [README](README.md) (`Parse`,
 | 3 | [Config-aware `registerMergeFilter`](#3-config-aware-registermergefilter) | low | additive | subclass + `FilterRegistrar` creator |
 | 4 | [Injectable registry, duplicate detection](#4-injectable-registry-duplicate-detection) | low | mostly additive | unique names |
 | 5 | [Documentation: 0..n outputs, large messages](#5-documentation-0n-outputs-large-messages) | doc only | — | — |
-| 6 | [Known limitations to lift](#6-known-limitations-to-lift) | low–medium | additive | JSON config; read `GraphOutputs` carefully |
+| 6 | [Known limitations to lift](#6-known-limitations-to-lift) | low–medium | additive | a parameter or JSON config; read `GraphOutputs` carefully |
 | 7 | [2D box layout for console rendering](#7-2d-box-layout-for-console-rendering) | low | additive | `toAscii` listing; `toDot` into `graph-easy --as=boxart` |
 
 Items of the same list that are done, and therefore not repeated here:
@@ -172,8 +172,9 @@ The [current limitations](README.md#current-limitations) the README lists, as
 work items:
 
 - **Nested stage arguments in the DSL.** Arguments are flat `key=value` pairs;
-  nested objects and lists are not expressible, so a stage that needs them has
-  to be configured in JSON. Lifting this means a value grammar for objects and
+  nested objects and lists cannot be written inline, so a stage that needs them
+  takes them from a parameter (`classes=$report.classes`, see the README) or is
+  configured in JSON. Lifting this means a value grammar for objects and
   arrays, plus diagnostics for it.
 - **Type checking inside `GraphOutputs`.** Only the graph's input type and the
   single `out` type are checked against the C++ template parameters. The types

@@ -490,7 +490,8 @@ private:
 } // namespace detail::handwritten
 
 // Parses a graph program with the deprecated hand-written parser. Produces the
-// same result as parseGraphProgram.
+// same result as parseGraphProgram, except that it does not know parameters
+// (`$name` arguments and `params` lines), which came after its deprecation.
 [[deprecated("the hand-written DSL parser is deprecated; use dsl::parseGraphProgram, which gives the same result")]]
 inline GraphProgram parseGraphProgramHandwritten(std::string_view text)
 {

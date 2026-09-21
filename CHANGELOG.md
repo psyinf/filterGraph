@@ -117,6 +117,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   edge it produces (or `end`), fan-out as siblings, and each merge under its
   (named) group once its inputs have been shown. `AsciiStyle::plain` (the
   default) draws with ASCII, `AsciiStyle::unicode` with box-drawing characters.
+- **Parameters** (`GraphParameters.hpp`) — a stage argument can name a
+  parameter, `Truncate(width=$text.width)`, whose value comes from a parameter
+  file (a JSON object) that several graphs share. A graph file names its
+  parameter files with `params "tuning.json"` lines, relative to the graph
+  file; later files override earlier ones member by member.
+  **`dsl::loadGraphProgram(path, overrides)`** reads a graph file with its
+  parameter files and binds them; **`dsl::parseGraphProgram(text,
+  parameters)`**, **`dsl::bindParameters`** and **`dsl::loadParameters`** bind
+  values the caller supplies. Dots walk into nested objects, and a parameter
+  can hold any JSON value, so nested objects and lists can reach a stage from
+  the DSL. An unknown name is a located diagnostic with a suggestion; a
+  parameter file that cannot be read is one at its `params` line; parameters a
+  graph does not use are not reported. A graph built from a program whose
+  parameters were never bound reports each as not set, and the renderings show
+  unbound parameters as `$name`. New sample: `apps/tunedPipeline`.
+- `validateDslGraph` also takes a parsed `dsl::GraphProgram`.
 
 ### Changed
 - A `.<key>` on anything but `in` and `out` (e.g. `msg.x`) is now a diagnostic;
@@ -153,7 +169,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The hand-written DSL parser. It moved to `GraphLangHandwritten.hpp` as
   `dsl::parseGraphProgramHandwritten`, marked `[[deprecated]]`, and will be
   removed in a future release. It produces the same results as
-  `dsl::parseGraphProgram`; the tests check the two against each other.
+  `dsl::parseGraphProgram`, except that it does not support parameters; the
+  tests check the two against each other.
 
 ## [0.2.0] - 2026-09-15
 

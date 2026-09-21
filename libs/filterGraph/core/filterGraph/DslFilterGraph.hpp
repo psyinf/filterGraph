@@ -3,6 +3,7 @@
 #include <filterGraph/core/filterGraph/AnyMessageFilter.hpp>
 #include <filterGraph/core/filterGraph/FilterRegistry.hpp>
 #include <filterGraph/core/filterGraph/GraphLang.hpp>
+#include <filterGraph/core/filterGraph/GraphParameters.hpp>
 #include <filterGraph/core/filterGraph/MergeFilter.hpp>
 #include <filterGraph/core/filterGraph/MessageFilter.hpp>
 #include <filterGraph/core/filterGraph/Void.hpp>
@@ -555,6 +556,10 @@ public:
             {
                 continue; // already reported by parseGraphProgram; its output stays untyped
             }
+            if (!hasAllParameters(program, node, diagnostics))
+            {
+                continue; // its config is incomplete; its output stays untyped
+            }
 
             std::shared_ptr<AnyMessageFilter> filter;
             try
@@ -785,6 +790,32 @@ private:
 
     // Registers the graph's inputs: the single `in`, or the named `in.<key>`
     // of a GraphInputs graph, checked against the declared input types.
+    // Whether every `$name` argument of `node` has a value. If the program's
+    // parameters were never bound, reports each missing one; if they were,
+    // bindParameters has reported them already.
+    static bool hasAllParameters(const GraphProgram& program, const StageNode& node,
+                                std::vector<TextDiagnostic>& diagnostics)
+    {
+        bool bound = true;
+        for (const auto& parameter : node.parameters)
+        {
+            if (parameter.bound)
+            {
+                continue;
+            }
+            bound = false;
+            if (!program.parametersBound)
+            {
+                diagnostics.push_back(
+                    {parameter.loc,
+                     std::format("parameter '${}' is not set; load the graph with dsl::loadGraphProgram, or bind "
+                                 "its parameters with dsl::bindParameters",
+                                 parameter.name)});
+            }
+        }
+        return bound;
+    }
+
     template <typename SlotOf>
     void bindInputs(const GraphProgram&          program,
                     std::type_index              inputType,
@@ -1075,13 +1106,13 @@ private:
     dsl::detail::GraphPlan  mPlan;
 };
 
-// Checks DSL text for use as DslFilterGraph<InputType, OutputType> without
-// running any messages, and returns every problem found (sorted by location)
-// instead of throwing. Stages are instantiated to check their config and types.
+// Checks a parsed graph for use as DslFilterGraph<InputType, OutputType>
+// without running any messages, and returns every problem found (sorted by
+// location) instead of throwing. Stages are instantiated to check their config
+// and types.
 template <typename InputType, typename OutputType = GraphOutputs>
-std::vector<dsl::TextDiagnostic> validateDslGraph(std::string_view text)
+std::vector<dsl::TextDiagnostic> validateDslGraph(const dsl::GraphProgram& program)
 {
-    const dsl::GraphProgram          program     = dsl::parseGraphProgram(text);
     std::vector<dsl::TextDiagnostic> diagnostics = program.diagnostics;
     [[maybe_unused]] const dsl::detail::GraphPlan plan(
         program, typeid(InputType), dsl::detail::expectedOutputs<OutputType>(), nullptr, diagnostics);
@@ -1092,14 +1123,28 @@ std::vector<dsl::TextDiagnostic> validateDslGraph(std::string_view text)
 // The same for a graph with named inputs whose types are declared.
 template <typename InputType, typename OutputType = GraphOutputs>
     requires std::is_same_v<InputType, GraphInputs>
-std::vector<dsl::TextDiagnostic> validateDslGraph(std::string_view text, const GraphInputTypes& inputs)
+std::vector<dsl::TextDiagnostic> validateDslGraph(const dsl::GraphProgram& program, const GraphInputTypes& inputs)
 {
-    const dsl::GraphProgram          program     = dsl::parseGraphProgram(text);
     std::vector<dsl::TextDiagnostic> diagnostics = program.diagnostics;
     [[maybe_unused]] const dsl::detail::GraphPlan plan(
         program, typeid(InputType), dsl::detail::expectedOutputs<OutputType>(), &inputs, diagnostics);
     dsl::detail::sortDiagnostics(diagnostics);
     return diagnostics;
+}
+
+// Checks DSL text, as validateDslGraph(dsl::parseGraphProgram(text)).
+template <typename InputType, typename OutputType = GraphOutputs>
+std::vector<dsl::TextDiagnostic> validateDslGraph(std::string_view text)
+{
+    return validateDslGraph<InputType, OutputType>(dsl::parseGraphProgram(text));
+}
+
+// The same for a graph with named inputs whose types are declared.
+template <typename InputType, typename OutputType = GraphOutputs>
+    requires std::is_same_v<InputType, GraphInputs>
+std::vector<dsl::TextDiagnostic> validateDslGraph(std::string_view text, const GraphInputTypes& inputs)
+{
+    return validateDslGraph<InputType, OutputType>(dsl::parseGraphProgram(text), inputs);
 }
 
 } // namespace filterGraph

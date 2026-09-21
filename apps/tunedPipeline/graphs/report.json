@@ -1,0 +1,9 @@
+{
+    "report": {
+        "classes": [
+            { "upTo": 10, "label": "short" },
+            { "upTo": 30, "label": "medium" },
+            { "upTo": 1000, "label": "long" }
+        ]
+    }
+}
