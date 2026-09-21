@@ -11,13 +11,14 @@ paths, merge them back together, and drop/short-circuit messages — all without
 hard-coding the pipeline shape in source code.
 
 > **New here? Start with the [example walkthrough (EXAMPLE.md)](EXAMPLE.md)** —
-> a step-by-step, diagrammed tour of four runnable samples:
+> a step-by-step, diagrammed tour of five runnable samples:
 > [`apps/textPipeline`](apps/textPipeline/main.cpp) (the core building blocks),
 > [`apps/statefulPipeline`](apps/statefulPipeline/main.cpp) (stages that carry
 > state), [`apps/compositePipeline`](apps/compositePipeline/main.cpp)
-> (composing graphs out of graphs) and
+> (composing graphs out of graphs),
 > [`apps/namedPipeline`](apps/namedPipeline/main.cpp) (named merge slots and
-> graph inputs).
+> graph inputs) and [`apps/tunedPipeline`](apps/tunedPipeline/main.cpp)
+> (parameter files shared by several graphs).
 
 > **A note on the word "filter".** Here "filter" follows the Unix-pipeline and
 > media-graph (DirectShow / GStreamer / FFmpeg) tradition: a stage that reads a
@@ -101,9 +102,14 @@ drops the message, and everything downstream of that edge is skipped.
   **`registerTypedMergeFilter`** — fan-in stages that declare their slot types,
   so the edges of a group are checked when the graph is built and the stage
   receives typed `std::optional`s instead of `std::any`.
-- **`validateDslGraph<In, Out>(text)`** — the same checks as construction,
-  returned as a list of `line:column` diagnostics instead of a thrown
-  **`GraphError`**.
+- **Parameters** — `Stage(width=$text.width)` takes an argument from a
+  parameter file (JSON) that several graph files share, named in each with
+  `params "tuning.json"`; **`dsl::loadGraphProgram(path)`** loads a graph file
+  with its parameters, and **`dsl::bindParameters`** binds values the caller
+  supplies.
+- **`validateDslGraph<In, Out>(text)`** (or a parsed `GraphProgram`) — the
+  same checks as construction, returned as a list of `line:column` diagnostics
+  instead of a thrown **`GraphError`**.
 - **`dsl::parseGraphProgram`** / **`dsl::toMermaid`** / **`dsl::toDot`** /
   **`dsl::toAscii`** — parse a graph into its node/edge form and render it as a
   Mermaid flowchart, a Graphviz DOT digraph or a console listing. The parser is
@@ -420,6 +426,71 @@ matcher.filter(GraphInputs{}.set("orders", order).set("quotes", quote)); // one 
 - A graph uses either `in` or named inputs: `in` with `GraphInputs`, or
   `in.<key>` with any other input type, is a build-time diagnostic.
 
+### Parameters shared by several graphs
+
+Tuning values that several graphs must agree on belong in one place. An
+argument can name a **parameter**, `$name`, instead of giving a value, and a
+**parameter file** — a JSON object — gives the values. A graph file names its
+parameter files with `params` lines:
+
+```text
+# alerts.fg
+params "tuning.json"
+in -> MinLength(minLength=$text.minLength) -> long
+long -> Truncate(width=$text.width) -> out
+```
+
+```text
+# report.fg
+params "tuning.json"   # shared with alerts.fg
+params "report.json"   # this graph's own parameters
+in -> Truncate(width=$text.width) -> out.text
+in -> Classify(classes=$report.classes) -> out.size
+```
+
+```json
+{ "text": { "minLength": 12, "width": 16 } }
+```
+
+```cpp
+#include <filterGraph/core/filterGraph/DslFilterGraph.hpp> // includes GraphParameters.hpp
+
+DslFilterGraph<std::string, std::string> alerts(dsl::loadGraphProgram("graphs/alerts.fg"));
+DslFilterGraph<std::string>              report(dsl::loadGraphProgram("graphs/report.fg"));
+
+// The same graph with one value changed for this run; the files stay as they are.
+DslFilterGraph<std::string, std::string> narrow(
+    dsl::loadGraphProgram("graphs/alerts.fg", {{"text", {{"width", 6}}}}));
+
+// A graph given as text, with parameters from the caller.
+DslFilterGraph<std::string, std::string> fromText(
+    dsl::parseGraphProgram("in -> Truncate(width=$text.width) -> out", dsl::loadParameters("graphs/tuning.json")));
+```
+
+- **Names.** `$name` names a member of the parameter object; dots walk into
+  nested objects (`$text.width`). A parameter can hold any JSON value, so a
+  stage that needs a list or an object (`$report.classes`) can get one, which
+  inline arguments cannot express. Parameter files may contain `//` and
+  `/* */` comments.
+- **Several files.** `params` paths are relative to the graph file. Files are
+  applied in the order written, each overriding the ones before it member by
+  member (JSON merge patch: nested objects merge, other values replace), and
+  `loadGraphProgram`'s second argument is applied last.
+- **Checks.** A name that no file defines is a located diagnostic, with a
+  suggestion if one is close:
+  `1:22: unknown parameter '$text.widht' — did you mean '$text.width'?`. A file
+  that cannot be read, is not JSON or is not an object is a diagnostic at its
+  `params` line. Parameters a graph does not use are *not* reported, since a
+  file is meant to be shared.
+- **Without a file.** `dsl::parseGraphProgram(text)` reads no files: it records
+  the `params` lines (`GraphProgram::parameterFiles`) and leaves the
+  parameters unbound, which the renderings show as `width=$text.width`.
+  Building a graph from it reports each unbound parameter as not set.
+  `dsl::parseGraphProgram(text, parameters)` and `dsl::bindParameters(program,
+  parameters)` bind values from the caller instead.
+- A stage cannot tell a parameter from a literal argument: both arrive in its
+  config, and one stage's arguments can mix the two.
+
 ### Checking and visualizing a graph
 
 `validateDslGraph` runs every construction check without running a message
@@ -431,6 +502,9 @@ for (const auto& d : validateDslGraph<std::string, int>(text))
     std::cerr << dsl::formatDiagnostic(d) << '\n';
 }
 ```
+
+It takes a parsed `GraphProgram` as well, e.g.
+`validateDslGraph<std::string, int>(dsl::loadGraphProgram("graph.fg"))`.
 
 ```text
 1:7: unknown stage type 'Uppercas' — did you mean 'Uppercase'?
@@ -468,8 +542,9 @@ the UTF-8 code page (`chcp 65001`).
 
 ### Current limitations
 
-- Stage arguments are flat `key=value` pairs; nested objects and lists are not
-  expressible yet. Stages that need them can be configured in JSON.
+- Stage arguments are flat `key=value` pairs; nested objects and lists cannot
+  be written inline. A [parameter](#parameters-shared-by-several-graphs) can
+  hold them, or the stage can be configured in JSON.
 - Only the graph input type, the declared named input types and the single
   `out` type are checked against the C++ side; the types inside `GraphOutputs`
   are checked when they are read (`get<T>` throws `std::bad_any_cast` on a
@@ -679,9 +754,10 @@ Run the bundled examples directly after building:
 ./out/build/windows-msvc-release-user-mode/apps/statefulPipeline/statefulPipeline
 ./out/build/windows-msvc-release-user-mode/apps/compositePipeline/compositePipeline
 ./out/build/windows-msvc-release-user-mode/apps/namedPipeline/namedPipeline
+./out/build/windows-msvc-release-user-mode/apps/tunedPipeline/tunedPipeline
 ```
 
-[EXAMPLE.md](EXAMPLE.md) walks through all four, with their output.
+[EXAMPLE.md](EXAMPLE.md) walks through all five, with their output.
 
 ## Roadmap
 
@@ -696,8 +772,8 @@ available in the meantime. The current list:
 - **Injectable registry with duplicate detection**, instead of a singleton that
   silently overwrites.
 - **Documentation** of 0..n outputs, fan-out copies and stateful stages.
-- **Lifting the current limitations**: nested stage arguments in the DSL, and
-  type checking inside `GraphOutputs`.
+- **Lifting the current limitations**: nested stage arguments written inline in
+  the DSL, and type checking inside `GraphOutputs`.
 
 ## License
 

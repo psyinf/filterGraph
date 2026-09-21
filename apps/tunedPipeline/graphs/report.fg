@@ -1,0 +1,6 @@
+# Report: every line, cut to the same width as the alerts, and its size class.
+params "tuning.json"   # shared with alerts.fg
+params "report.json"   # this graph's own parameters
+
+in -> Truncate(width=$text.width) -> out.text
+in -> Classify(classes=$report.classes) -> out.size

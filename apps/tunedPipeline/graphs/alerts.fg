@@ -1,0 +1,5 @@
+# Alerts: the long lines, cut to the shared width.
+params "tuning.json"
+
+in -> MinLength(minLength=$text.minLength) -> long
+long -> Truncate(width=$text.width) -> out

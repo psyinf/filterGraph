@@ -47,6 +47,9 @@
 //   merge's slots, `(raw: a, checked: b) -> Merge -> c`, which matches them by
 //   name instead of by position; a group may read `in` / `in.<key>` directly,
 //   `(in, a)` or `(plots: a, ticks: in.ticks)`;
+// - an argument may name a parameter instead of giving a value,
+//   `Gate(max=$tracker.gate)`, and a line `params "tuning.json"` names a file
+//   of parameters shared by several graphs (see GraphParameters.hpp);
 // - `#` starts a comment that runs to the end of the line.
 //
 // This header parses (with a lexy-based parser) and structurally validates a
@@ -68,17 +71,37 @@ struct TextDiagnostic
     std::string message;
 };
 
+// A stage argument that names a parameter, `key=$name` (or `$section.name`),
+// instead of giving a value. bindParameters (GraphParameters.hpp) copies the
+// parameter's value into the stage's config.
+struct ParameterRef
+{
+    std::string argument;      // the config key it sets
+    std::string name;          // the parameter, without the '$'; dots address nested objects
+    SourceLoc   loc;           // of the '$'
+    bool        bound = false; // the value is in the stage's config
+};
+
 // A stage application: consumes one or more input edges (several = fan-in) and
 // either produces a named edge, or terminates the path at `out`/`end`.
 struct StageNode
 {
     std::string                type;    // registered filter/merge name
-    nlohmann::json             config;  // parsed config args
+    nlohmann::json             config;  // parsed config args; an unbound parameter is null
     std::vector<std::string>   inputs;  // source edge names ("in" allowed)
     std::optional<std::string> output;  // produced edge name ("$outN" for `out`); nullopt => routed to end
     bool                       fanIn = false; // inputs came from a group `(a, b) -> Stage`
     std::vector<std::string>   slotNames; // per input, from `(name: edge, ...)`; empty for a positional group
+    std::vector<ParameterRef>  parameters; // arguments given as `$name`
     SourceLoc                  loc;
+};
+
+// A parameter file the program names with `params "file.json"`. Parsing does
+// not read it; loadGraphProgram (GraphParameters.hpp) does.
+struct ParameterFile
+{
+    std::string path; // as written: relative to the graph file, or absolute
+    SourceLoc   loc;  // of the path
 };
 
 // One graph input the program reads: `in`, or a named `in.<key>`, located at
@@ -105,6 +128,8 @@ struct GraphProgram
     std::vector<InputBinding>   inputs;   // distinct graph inputs, in order of first use
     std::vector<OutputBinding>  outputs;
     std::vector<std::string>    deadEnds; // edges routed to `end`
+    std::vector<ParameterFile>  parameterFiles; // in written order; later files override earlier ones
+    bool                        parametersBound = false; // bindParameters ran (and reported unknown names)
     std::vector<TextDiagnostic> diagnostics;
 
     bool ok() const
@@ -310,6 +335,20 @@ inline Found describeFound(std::string_view rest)
     return {true, unexpectedCharacter(c)};
 }
 
+// A line that starts (after blanks) with `params "`: a parameter file, not a
+// statement. A statement cannot have a string literal as its second token, so
+// an edge named `params` stays usable.
+inline bool startsParameterFile(std::string_view rest)
+{
+    constexpr std::string_view keyword = "params";
+    if (!rest.starts_with(keyword))
+    {
+        return false;
+    }
+    const std::size_t next = rest.find_first_not_of(" \t", keyword.size());
+    return next != std::string_view::npos && rest[next] == '"';
+}
+
 // -------------------------------- terms ----------------------------------
 
 // A single term in a statement, already classified by the parser.
@@ -320,13 +359,15 @@ struct Term
         Edge,   // a plain edge identifier, or `in`
         Boundary, // `out` / `out.<key>` / `end`
         Stage,  // a stage application (name + config)
-        Group   // a fan-in group of edges
+        Group,  // a fan-in group of edges
+        ParameterFile // a `params "file.json"` line; `name` is the path
     };
 
     Kind                       kind = Kind::Edge;
     std::string                name;    // edge/stage/boundary name
     std::optional<std::string> key;     // for `in.<key>` / `out.<key>`
     nlohmann::json             config;  // for Stage
+    std::vector<ParameterRef>  parameters; // for Stage: arguments given as `$name`
     std::vector<std::string>   edges;   // for Group
     std::vector<std::optional<std::string>> edgeKeys; // for Group: per edge, from `edge.<key>`
     std::vector<SourceLoc>     edgeLocs;  // for Group: per edge
@@ -487,8 +528,9 @@ inline void buildStatement(std::vector<Term>&           terms,
         StageNode node;
         node.type = terms[i].name;
         // A stage without `(...)` gets an empty object, as a JSON stage without "config" does.
-        node.config = terms[i].config.is_null() ? nlohmann::json::object() : terms[i].config;
-        node.loc    = terms[i].loc;
+        node.config     = terms[i].config.is_null() ? nlohmann::json::object() : terms[i].config;
+        node.parameters = terms[i].parameters;
+        node.loc        = terms[i].loc;
 
         const Term& source = terms[i - 1];
         if (source.kind == Term::Kind::Group)
@@ -802,34 +844,64 @@ inline bool parseStatementLine(std::string_view             lineText,
         return fail(sc.position(), found.invalid ? found.text : std::format("{} but found {}", expected, found.text));
     };
 
+    // A string literal at the current position.
+    auto parseString = [&](std::string& value) {
+        auto literal = scanStringLiteral(rest());
+        if (!literal)
+        {
+            return fail(sc.position(), "unterminated string literal");
+        }
+        // Consume chunk by chunk up to the closing quote; an escaped quote
+        // or backslash is consumed on its own so it cannot end a chunk.
+        sc.parse(ld::lit_c<'"'>);
+        while (sc)
+        {
+            sc.parse(ld::until(stringStop));
+            if (!sc || sc.position()[-1] == '"')
+            {
+                break;
+            }
+            if (!sc.branch(ld::lit_c<'"'>))
+            {
+                sc.branch(ld::lit_c<'\\'>);
+            }
+        }
+        value = std::move(literal->value);
+        return static_cast<bool>(sc);
+    };
+
+    // `$name` or `$section.name`, without blanks; `name` receives it without the '$'.
+    auto parseReference = [&](std::string& name) {
+        sc.parse(ld::lit_c<'$'>);
+        while (true)
+        {
+            if (!sc.peek(ld::ascii::alpha_underscore))
+            {
+                return unexpected(name.empty() ? "expected a parameter name after '$'"
+                                               : std::format("expected a name after '${}'", name));
+            }
+            name += captureIdent();
+            if (!sc.branch(ld::lit_c<'.'>))
+            {
+                return true;
+            }
+            name += '.';
+        }
+    };
+
     auto parseValue = [&](nlohmann::json& value) {
         const char* const      start = sc.position();
         const std::string_view text  = rest();
 
         if (sc.peek(ld::lit_c<'"'>))
         {
-            auto literal = scanStringLiteral(text);
-            if (!literal)
+            std::string string;
+            if (!parseString(string))
             {
-                return fail(start, "unterminated string literal");
+                return false;
             }
-            // Consume chunk by chunk up to the closing quote; an escaped quote
-            // or backslash is consumed on its own so it cannot end a chunk.
-            sc.parse(ld::lit_c<'"'>);
-            while (sc)
-            {
-                sc.parse(ld::until(stringStop));
-                if (!sc || sc.position()[-1] == '"')
-                {
-                    break;
-                }
-                if (!sc.branch(ld::lit_c<'"'>))
-                {
-                    sc.branch(ld::lit_c<'\\'>);
-                }
-            }
-            value = std::move(literal->value);
-            return static_cast<bool>(sc);
+            value = std::move(string);
+            return true;
         }
 
         if (const std::size_t length = numberLength(text))
@@ -858,8 +930,9 @@ inline bool parseStatementLine(std::string_view             lineText,
         return unexpected("expected an argument value");
     };
 
-    auto parseArgs = [&](nlohmann::json& config) {
-        const char* const open = sc.position();
+    auto parseArgs = [&](Term& stage) {
+        nlohmann::json&   config = stage.config;
+        const char* const open   = sc.position();
         sc.parse(ld::lit_c<'('>);
         config = nlohmann::json::object();
         while (true)
@@ -888,6 +961,19 @@ inline bool parseStatementLine(std::string_view             lineText,
                 return unexpected(std::format("expected '=' after argument '{}'", key));
             }
             skipBlank();
+            // The last value given for a key wins, as in a JSON object.
+            std::erase_if(stage.parameters, [&](const ParameterRef& parameter) { return parameter.argument == key; });
+            if (sc.peek(ld::lit_c<'$'>))
+            {
+                ParameterRef parameter{key, {}, locOf(sc.position())};
+                if (!parseReference(parameter.name))
+                {
+                    return false;
+                }
+                config[key] = nullptr;
+                stage.parameters.push_back(std::move(parameter));
+                continue;
+            }
             nlohmann::json value;
             if (!parseValue(value))
             {
@@ -895,6 +981,26 @@ inline bool parseStatementLine(std::string_view             lineText,
             }
             config[key] = std::move(value);
         }
+    };
+
+    // `params "file.json"`, a line of its own.
+    auto parseParameterFile = [&] {
+        sc.parse(LEXY_LIT("params"));
+        skipBlank();
+        Term term;
+        term.kind = Term::Kind::ParameterFile;
+        term.loc  = locOf(sc.position());
+        if (!parseString(term.name))
+        {
+            return false;
+        }
+        skipBlank();
+        if (!atEndOfLine())
+        {
+            return unexpected("expected end of line after the parameter file");
+        }
+        terms.push_back(std::move(term));
+        return true;
     };
 
     auto parseGroup = [&] {
@@ -978,7 +1084,7 @@ inline bool parseStatementLine(std::string_view             lineText,
         if (sc.peek(ld::lit_c<'('>))
         {
             term.kind = Term::Kind::Stage;
-            if (!parseArgs(term.config))
+            if (!parseArgs(term))
             {
                 return false;
             }
@@ -1013,6 +1119,10 @@ inline bool parseStatementLine(std::string_view             lineText,
     if (atEndOfLine())
     {
         return true; // blank or comment-only line
+    }
+    if (startsParameterFile(rest()))
+    {
+        return parseParameterFile();
     }
     if (!parseTerm())
     {
@@ -1060,7 +1170,14 @@ inline GraphProgram parseGraphProgram(std::string_view text)
         std::vector<detail::Term> terms;
         if (detail::lexy_impl::parseStatementLine(line, lineNo, terms, program.diagnostics) && !terms.empty())
         {
-            detail::buildStatement(terms, program, outputIndex, program.diagnostics);
+            if (terms.front().kind == detail::Term::Kind::ParameterFile)
+            {
+                program.parameterFiles.push_back({std::move(terms.front().name), terms.front().loc});
+            }
+            else
+            {
+                detail::buildStatement(terms, program, outputIndex, program.diagnostics);
+            }
         }
 
         if (newline == std::string_view::npos)
@@ -1098,6 +1215,28 @@ inline std::string displayName(const std::unordered_map<std::string, std::string
     return it != names.end() ? it->second : edge;
 }
 
+// The parameter an argument names, while it is not bound: its value is not
+// known yet, so renderings show `$name` instead.
+inline const ParameterRef* unboundParameter(const StageNode& stage, const std::string& argument)
+{
+    auto it = std::ranges::find_if(stage.parameters, [&](const ParameterRef& parameter) {
+        return !parameter.bound && parameter.argument == argument;
+    });
+    return it != stage.parameters.end() ? &*it : nullptr;
+}
+
+// An argument's value as written in a rendering: `$name` for an unbound
+// parameter, strings unquoted or quoted as asked, anything else as JSON.
+inline std::string argumentText(const StageNode& stage, const std::string& argument, const nlohmann::json& value,
+                                bool quoteStrings)
+{
+    if (const ParameterRef* parameter = unboundParameter(stage, argument))
+    {
+        return '$' + parameter->name;
+    }
+    return value.is_string() && !quoteStrings ? value.get<std::string>() : value.dump();
+}
+
 // A stage's config as "key=value" lines, strings unquoted, for diagram labels.
 inline std::vector<std::string> configLines(const StageNode& stage)
 {
@@ -1106,8 +1245,7 @@ inline std::vector<std::string> configLines(const StageNode& stage)
     {
         for (const auto& item : stage.config.items())
         {
-            const std::string value = item.value().is_string() ? item.value().get<std::string>() : item.value().dump();
-            lines.push_back(item.key() + '=' + value);
+            lines.push_back(item.key() + '=' + argumentText(stage, item.key(), item.value(), false));
         }
     }
     return lines;
@@ -1329,7 +1467,7 @@ inline std::string stageCall(const StageNode& stage)
         std::string args;
         for (const auto& item : stage.config.items())
         {
-            args += (args.empty() ? "" : ", ") + item.key() + '=' + item.value().dump();
+            args += (args.empty() ? "" : ", ") + item.key() + '=' + argumentText(stage, item.key(), item.value(), true);
         }
         text += '(' + args + ')';
     }

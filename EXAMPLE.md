@@ -1,6 +1,6 @@
 # filterGraph by example
 
-This walkthrough follows four runnable samples under [`apps/`](apps/), all of
+This walkthrough follows five runnable samples under [`apps/`](apps/), all of
 them small text pipelines:
 
 | Sections | Sample | Covers |
@@ -9,8 +9,9 @@ them small text pipelines:
 | 8 | [`statefulPipeline`](apps/statefulPipeline/main.cpp) | stages that **carry state**: `finish()`, the `GraphContext`, a merge with per-instance state |
 | 9 | [`compositePipeline`](apps/compositePipeline/main.cpp) | **composition**: `JoinFilter`, a graph nested as a stage, a `Void` sink, in-band ticks |
 | 10 | [`namedPipeline`](apps/namedPipeline/main.cpp) | **names in the wiring**: named merge slots, several named graph inputs (also read directly by a merge), and the checks both make possible |
+| 11 | [`tunedPipeline`](apps/tunedPipeline/main.cpp) | **parameters**: graph files that share their tuning values through a parameter file, one-off overrides, and the checks for misspelled names |
 
-Start at the top: sections 8–10 assume the vocabulary of 1–7.
+Start at the top: sections 8–11 assume the vocabulary of 1–7.
 
 ## Core concept: a chain of stages
 
@@ -968,6 +969,124 @@ in.greeting
 `-> Greet -> out
 ```
 
+## 11. Parameters shared by several graphs
+
+Two graphs that cut lines to a width should cut them to the *same* width. With
+the width written into each graph, keeping them in step is a matter of care.
+The fifth sample, [`apps/tunedPipeline/main.cpp`](apps/tunedPipeline/main.cpp),
+keeps such values in a parameter file that the graphs share, under
+[`apps/tunedPipeline/graphs/`](apps/tunedPipeline/graphs/):
+
+```text
+# alerts.fg: the long lines, cut to the shared width.
+params "tuning.json"
+
+in -> MinLength(minLength=$text.minLength) -> long
+long -> Truncate(width=$text.width) -> out
+```
+
+```text
+# report.fg: every line, cut to the same width as the alerts, and its size class.
+params "tuning.json"   # shared with alerts.fg
+params "report.json"   # this graph's own parameters
+
+in -> Truncate(width=$text.width) -> out.text
+in -> Classify(classes=$report.classes) -> out.size
+```
+
+```jsonc
+// tuning.json
+{ "text": { "minLength": 12, "width": 16 } }
+
+// report.json
+{ "report": { "classes": [ { "upTo": 10, "label": "short" },
+                           { "upTo": 30, "label": "medium" },
+                           { "upTo": 1000, "label": "long" } ] } }
+```
+
+```mermaid
+flowchart LR
+    tuning[/"tuning.json<br/>text.minLength, text.width"/]
+    report[/"report.json<br/>report.classes"/]
+    alerts["alerts.fg"]
+    reportGraph["report.fg"]
+    tuning --> alerts
+    tuning --> reportGraph
+    report --> reportGraph
+```
+
+- An argument written `$text.width` names a parameter; the dot walks into the
+  `text` object. `$report.classes` is a list of objects, which an inline
+  argument cannot express.
+- The `params` paths are relative to the graph file. When a graph names
+  several files, later ones override earlier ones member by member.
+
+### Loading the graphs
+
+```cpp
+DslFilterGraph<std::string, std::string> alerts(dsl::loadGraphProgram(graphs / "alerts.fg"));
+DslFilterGraph<std::string>              report(dsl::loadGraphProgram(graphs / "report.fg"));
+```
+
+`loadGraphProgram` reads the graph file and its parameter files and binds the
+parameters; the stages receive them in their config like any other argument.
+Both graphs cut at 16 characters, and changing `text.width` in `tuning.json`
+changes both:
+
+```text
+[shared] short one            short   alert: -
+[shared] a line of medium...  medium  alert: a line of medium...
+[shared] and a considerab...  long    alert: and a considerab...
+```
+
+### One value changed for a run
+
+To try a value out without editing the file, pass overrides; they apply on top
+of the files, the same way the files apply on top of each other:
+
+```cpp
+DslFilterGraph<std::string, std::string> alerts(
+    dsl::loadGraphProgram(graphs / "alerts.fg", {{"text", {{"width", 6}}}}));
+```
+
+```text
+[override] and a ...
+```
+
+### Unbound and bound
+
+`dsl::parseGraphProgram(text)` reads no files, so a program parsed from text
+has its parameters unbound, and the renderings show them by name. Binding them,
+here from a parameter file read with `dsl::loadParameters`, puts in the values:
+
+```cpp
+dsl::toAscii(dsl::parseGraphProgram("in -> Truncate(width=$text.width) -> out"));
+dsl::toAscii(dsl::parseGraphProgram("in -> Truncate(width=$text.width) -> out",
+                                    dsl::loadParameters(graphs / "tuning.json")));
+```
+
+```text
+in
+`-> Truncate(width=$text.width) -> out
+
+in
+`-> Truncate(width=16) -> out
+```
+
+A graph built from the unbound program would report
+`1:22: parameter '$text.width' is not set; ...`.
+
+### A misspelled parameter
+
+A name no parameter file defines is a located diagnostic, with a suggestion if
+one is close. Parameters a graph does not use are fine: `alerts.fg` never reads
+`report.classes`, and a shared file will always hold values that some graph
+does not need.
+
+```text
+[check] 1:22: unknown parameter '$text.widht' — did you mean '$text.width'?
+```
+
 ## Build & run these examples
 
 ```powershell
@@ -980,7 +1099,11 @@ cmake --build --preset windows-msvc-release-user-mode
 ./out/build/windows-msvc-release-user-mode/apps/statefulPipeline/statefulPipeline
 ./out/build/windows-msvc-release-user-mode/apps/compositePipeline/compositePipeline
 ./out/build/windows-msvc-release-user-mode/apps/namedPipeline/namedPipeline
+./out/build/windows-msvc-release-user-mode/apps/tunedPipeline/tunedPipeline
 ```
+
+`tunedPipeline` finds its graph files in the source tree; pass another
+directory as its first argument to load graphs from there.
 
 On Linux/macOS, use a matching preset such as `unixlike-gcc-release` or
 `unixlike-clang-release`.
@@ -1071,3 +1194,20 @@ And of `namedPipeline` (section 10):
 
 followed by the Mermaid flowchart and the `[direct]` block shown in section 10.
 (The `[feed check]` type name is shortened here too.)
+
+And of `tunedPipeline` (section 11):
+
+```text
+[shared] short one            short   alert: -
+[shared] a line of medium...  medium  alert: a line of medium...
+[shared] and a considerab...  long    alert: and a considerab...
+[override] and a ...
+
+in
+`-> Truncate(width=$text.width) -> out
+
+in
+`-> Truncate(width=16) -> out
+
+[check] 1:22: unknown parameter '$text.widht' — did you mean '$text.width'?
+```

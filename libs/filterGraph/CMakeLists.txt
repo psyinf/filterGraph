@@ -20,6 +20,7 @@ target_sources(${PROJECT_NAME}
     core/filterGraph/GraphLang.hpp
     core/filterGraph/GraphLangLexy.hpp
     core/filterGraph/GraphLangHandwritten.hpp
+    core/filterGraph/GraphParameters.hpp
     core/filterGraph/DslFilterGraph.hpp
     core/filterGraph/GraphContext.hpp
 )
